@@ -3,7 +3,7 @@
 import { useState } from "react";
 import dynamic from "next/dynamic";
 import { useLiveConnection } from "@/lib/socket";
-import { useStore, selectCompanyList } from "@/lib/store";
+import { useStore, useCompanyList } from "@/lib/store";
 import TopBar from "@/components/TopBar";
 import Sidebar, { type NavKey } from "@/components/Sidebar";
 import MarketOverview from "@/components/MarketOverview";
@@ -51,7 +51,7 @@ export default function Home() {
 }
 
 function MainContent({ nav }: { nav: NavKey }) {
-  const companies = useStore(selectCompanyList);
+  const companies = useCompanyList();
   const selectedTicker = useStore((s) => s.selectedTicker);
 
   if (nav === "analytics") {

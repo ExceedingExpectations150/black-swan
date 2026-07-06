@@ -10,7 +10,7 @@ import {
   Marker,
 } from "react-simple-maps";
 import type { Company } from "@/lib/types";
-import { useStore, selectCompanyList } from "@/lib/store";
+import { useStore, useCompanyList } from "@/lib/store";
 import {
   sentimentColor,
   fmtPrice,
@@ -164,7 +164,7 @@ function Tooltip({ company }: { company: Company }) {
 }
 
 export default function WorldMap() {
-  const companies = useStore(selectCompanyList);
+  const companies = useCompanyList();
   const selectedTicker = useStore((s) => s.selectedTicker);
   const [hovered, setHovered] = useState<string | null>(null);
 

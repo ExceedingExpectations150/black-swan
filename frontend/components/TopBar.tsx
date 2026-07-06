@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Search, Globe } from "lucide-react";
-import { useStore, selectCompanyList } from "@/lib/store";
+import { useStore, useCompanyList } from "@/lib/store";
 import { fmtPrice, fmtPct, changeClass } from "@/lib/format";
 import Sparkline from "@/components/Sparkline";
 
@@ -21,7 +21,7 @@ function useUtcClock(): { time: string; date: string } {
 
 export default function TopBar() {
   const indices = useStore((s) => s.indices);
-  const companies = useStore(selectCompanyList);
+  const companies = useCompanyList();
   const setSelectedTicker = useStore((s) => s.setSelectedTicker);
   const { time, date } = useUtcClock();
   const [query, setQuery] = useState("");

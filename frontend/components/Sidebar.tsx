@@ -11,7 +11,7 @@ import {
   ChevronRight,
   Circle,
 } from "lucide-react";
-import { useStore, selectCompanyList } from "@/lib/store";
+import { useStore, useCompanyList } from "@/lib/store";
 import { fmtPrice, fmtPct, changeClass } from "@/lib/format";
 import Sparkline from "@/components/Sparkline";
 
@@ -33,7 +33,7 @@ export default function Sidebar({
   active: NavKey;
   onNavigate: (key: NavKey) => void;
 }) {
-  const companies = useStore(selectCompanyList);
+  const companies = useCompanyList();
   const watchlist = useStore((s) => s.watchlist);
   const indices = useStore((s) => s.indices);
   const connection = useStore((s) => s.connectionStatus);

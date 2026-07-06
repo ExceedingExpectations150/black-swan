@@ -5,6 +5,7 @@
 // components read via selectors. Dispatch is purely on message.type — never
 // assume ordering. Nothing here fabricates data.
 
+import { useMemo } from "react";
 import { create } from "zustand";
 import type {
   Company,
@@ -158,6 +159,11 @@ export const useStore = create<StoreState>((set) => ({
     }),
 }));
 
-// Stable selectors (avoid re-render churn).
-export const selectCompanyList = (s: StoreState): Company[] =>
-  Object.values(s.companies);
+// Company list as a MEMOIZED hook. A raw selector returning Object.values()
+// would allocate a new array every render and drive zustand into an infinite
+// loop ("getServerSnapshot should be cached"); select the stable record and
+// derive the array with useMemo instead.
+export function useCompanyList(): Company[] {
+  const companies = useStore((s) => s.companies);
+  return useMemo(() => Object.values(companies), [companies]);
+}

@@ -11,7 +11,7 @@ import TopMovers from "@/components/TopMovers";
 import SocialFeed from "@/components/SocialFeed";
 import EconomyPanel from "@/components/EconomyPanel";
 import CompanyDetail from "@/components/CompanyDetail";
-import LiveStockChart from "@/components/LiveStockChart";
+import StockMarketView from "@/components/StockMarketView";
 
 // react-simple-maps is client-only; skip SSR to avoid window/hydration issues.
 const WorldMap = dynamic(() => import("@/components/WorldMap"), {
@@ -52,7 +52,6 @@ export default function Home() {
 
 function MainContent({ nav }: { nav: NavKey }) {
   const companies = useCompanyList();
-  const selectedTicker = useStore((s) => s.selectedTicker);
 
   if (nav === "analytics") {
     return (
@@ -71,11 +70,10 @@ function MainContent({ nav }: { nav: NavKey }) {
   }
 
   if (nav === "market") {
-    const ticker = selectedTicker ?? companies[0]?.ticker;
     return (
       <div className="panel min-h-0 flex-1 p-3">
-        {ticker ? (
-          <LiveStockChart ticker={ticker} />
+        {companies.length > 0 ? (
+          <StockMarketView />
         ) : (
           <div className="flex h-full items-center justify-center text-[11px] tracking-widest text-ink3">
             AWAITING MARKET DATA

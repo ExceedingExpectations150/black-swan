@@ -234,11 +234,17 @@ class TickEngine:
                 )
                 events.append(_event("price_update", tick_id, {"prices": price_updates}))
 
-                # 7. Economy analysis (+ periodic macro analyst).
+                # 7. Economy analysis (+ periodic macro analyst). The analyst
+                # is best-effort like the PR desk / swarm: a rate-limit or API
+                # error must not crash the whole simulation loop.
                 snapshot = compute_economy_snapshot(db, tick_id)
                 if tick_id % ANALYST_EVERY_N_TICKS == 0:
                     digest = self._economy_digest(snapshot)
-                    narrative = await self.analyst.narrate(http, digest)
+                    try:
+                        narrative = await self.analyst.narrate(http, digest)
+                    except RuntimeError as exc:
+                        logger.warning("macro analyst failed (tick %d): %s", tick_id, exc)
+                        narrative = ""
                     if narrative:
                         snapshot["narrative"] = narrative
                 persist_economy_snapshot(db, snapshot)

@@ -78,6 +78,12 @@ export interface MarketIndex {
 export interface PricePoint {
   t: number;
   price: number;
+  volume?: number;
+}
+
+export interface VolumePoint {
+  t: number;
+  v: number;
 }
 
 // WebSocket envelope: { type, tick_id, ts, payload }

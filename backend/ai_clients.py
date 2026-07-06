@@ -34,8 +34,11 @@ GEMINI_ENDPOINT_TEMPLATE: Final[str] = (
 # flash. The "Gemma cohort" concept is preserved; only the served model differs.
 PRIMARY_MODEL: Final[str] = "gemini-2.5-flash"
 FALLBACK_MODEL: Final[str] = "gemini-2.0-flash"
-MAX_RETRIES: Final[int] = 3
-BACKOFF_BASE_SECONDS: Final[float] = 1.0
+# Retry/backoff kept short: under free-tier quota the LLM cohort/PR calls
+# 429 every tick, and long backoff stalls the whole simulation. The quant
+# (TimesFM) path is local and unaffected, so a fast fail keeps ticks flowing.
+MAX_RETRIES: Final[int] = 1
+BACKOFF_BASE_SECONDS: Final[float] = 0.25
 # Flash models can also reason before answering; keep the cap generous so the
 # final JSON is never truncated (observed live 2026-07-06).
 MAX_OUTPUT_TOKENS: Final[int] = 8192

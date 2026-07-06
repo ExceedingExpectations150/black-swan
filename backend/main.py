@@ -291,7 +291,7 @@ async def get_company(ticker: str) -> dict[str, Any]:
     payload = _company_payload(company)
     payload["recent_posts"] = [_post_payload(p) for p in posts]
     payload["price_series"] = [
-        {"t": row.tick_id, "price": row.price} for row in reversed(series)
+        {"t": row.tick_id, "price": row.price, "volume": row.volume} for row in reversed(series)
     ]
     return payload
 
@@ -313,7 +313,10 @@ async def get_company_prices(ticker: str, limit: int = 512) -> dict[str, Any]:
         )
     return {
         "ticker": company.ticker,
-        "prices": [{"t": row.tick_id, "price": row.price} for row in reversed(series)],
+        "prices": [
+            {"t": row.tick_id, "price": row.price, "volume": row.volume}
+            for row in reversed(series)
+        ],
     }
 
 

@@ -15,6 +15,7 @@ import type {
   PricePoint,
   SocialPostT,
   StateSnapshot,
+  VolumePoint,
 } from "./types";
 
 const PRICE_SERIES_CAP = 512;
@@ -23,6 +24,7 @@ const SOCIAL_CAP = 100;
 interface StoreState {
   companies: Record<string, Company>;
   priceSeries: Record<string, PricePoint[]>;
+  volumeSeries: Record<string, VolumePoint[]>;
   social: SocialPostT[];
   economy: Economy | null;
   indices: MarketIndex[];
@@ -62,6 +64,7 @@ interface StoreState {
 export const useStore = create<StoreState>((set) => ({
   companies: {},
   priceSeries: {},
+  volumeSeries: {},
   social: [],
   economy: null,
   indices: [],
@@ -102,6 +105,7 @@ export const useStore = create<StoreState>((set) => ({
     set((s) => {
       const companies = { ...s.companies };
       const priceSeries = { ...s.priceSeries };
+      const volumeSeries = { ...s.volumeSeries };
       for (const p of prices) {
         const existing = companies[p.ticker];
         if (existing) {
@@ -113,10 +117,14 @@ export const useStore = create<StoreState>((set) => ({
           };
         }
         const series = priceSeries[p.ticker] ? [...priceSeries[p.ticker]] : [];
-        series.push({ t: tickId, price: p.price });
+        series.push({ t: tickId, price: p.price, volume: p.volume });
         priceSeries[p.ticker] = series.slice(-PRICE_SERIES_CAP);
+
+        const vol = volumeSeries[p.ticker] ? [...volumeSeries[p.ticker]] : [];
+        vol.push({ t: tickId, v: p.volume });
+        volumeSeries[p.ticker] = vol.slice(-PRICE_SERIES_CAP);
       }
-      return { companies, priceSeries };
+      return { companies, priceSeries, volumeSeries };
     }),
 
   applyCompanyUpdate: (updates) =>
@@ -148,14 +156,27 @@ export const useStore = create<StoreState>((set) => ({
     set((s) => {
       // Backfill from REST: keep the longer of (backfill, live) and dedupe by t.
       const live = s.priceSeries[ticker] ?? [];
-      const byT = new Map<number, number>();
-      for (const p of points) byT.set(p.t, p.price);
-      for (const p of live) byT.set(p.t, p.price);
-      const merged = Array.from(byT.entries())
-        .sort((a, b) => a[0] - b[0])
-        .map(([t, price]) => ({ t, price }))
+      const byT = new Map<number, PricePoint>();
+      for (const p of points) byT.set(p.t, p);
+      for (const p of live) byT.set(p.t, p);
+      const merged = Array.from(byT.values())
+        .sort((a, b) => a.t - b.t)
         .slice(-PRICE_SERIES_CAP);
-      return { priceSeries: { ...s.priceSeries, [ticker]: merged } };
+
+      // Volume backfill: only points that actually carry a volume value.
+      const liveVol = s.volumeSeries[ticker] ?? [];
+      const volByT = new Map<number, number>();
+      for (const p of points) if (p.volume != null) volByT.set(p.t, p.volume);
+      for (const p of liveVol) volByT.set(p.t, p.v);
+      const mergedVol = Array.from(volByT.entries())
+        .sort((a, b) => a[0] - b[0])
+        .map(([t, v]) => ({ t, v }))
+        .slice(-PRICE_SERIES_CAP);
+
+      return {
+        priceSeries: { ...s.priceSeries, [ticker]: merged },
+        volumeSeries: { ...s.volumeSeries, [ticker]: mergedVol },
+      };
     }),
 }));
 

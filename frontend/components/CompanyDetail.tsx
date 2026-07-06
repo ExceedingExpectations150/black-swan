@@ -1,6 +1,6 @@
 "use client";
 
-// Right-side company drawer for the ChaosNet terminal. Backfills description +
+// Right-side company drawer for the Black Swan terminal. Backfills description +
 // recent posts + price history on open, then stays live from the store. Renders
 // nothing until a ticker is selected.
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Search, Globe } from "lucide-react";
+import { Search } from "lucide-react";
 import { useStore, useCompanyList } from "@/lib/store";
 import { fmtPrice, fmtPct, changeClass } from "@/lib/format";
 import Sparkline from "@/components/Sparkline";
@@ -37,10 +37,17 @@ export default function TopBar() {
   return (
     <header className="flex h-14 items-center gap-4 border-b border-hair px-4">
       <div className="flex items-center gap-2.5 shrink-0">
-        <Globe size={18} className="text-ink" />
+        {/* Black swan mark: source art is black-on-white, inverted to white. */}
+        <img
+          src="/swan.png"
+          alt="Black Swan"
+          width={26}
+          height={26}
+          style={{ filter: "invert(1)", objectFit: "contain" }}
+        />
         <div className="leading-none">
-          <div className="font-display text-sm font-semibold tracking-tight text-ink">
-            ChaosNet
+          <div className="font-display text-sm font-semibold tracking-[0.14em] text-ink">
+            BLACK SWAN
           </div>
           <div className="mt-0.5 text-[9px] uppercase tracking-[0.2em] text-ink3">
             Global Intelligence

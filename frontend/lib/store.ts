@@ -1,6 +1,6 @@
 "use client";
 
-// Single live store for the ChaosNet global-intelligence terminal.
+// Single live store for the Black Swan global-intelligence terminal.
 // The WebSocket client (lib/socket.ts) is the only writer of live deltas;
 // components read via selectors. Dispatch is purely on message.type — never
 // assume ordering. Nothing here fabricates data.

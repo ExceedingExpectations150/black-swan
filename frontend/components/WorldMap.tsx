@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { geoInterpolate } from "d3-geo";
 import {
   ComposableMap,
@@ -8,25 +8,18 @@ import {
   Geography,
   Line,
   Marker,
+  ZoomableGroup,
 } from "react-simple-maps";
 import type { Company } from "@/lib/types";
 import { useStore, useCompanyList } from "@/lib/store";
-import {
-  sentimentColor,
-  fmtPrice,
-  fmtPct,
-  changeClass,
-  monogram,
-} from "@/lib/format";
+import { sentimentColor, fmtPrice, fmtPct, changeClass, monogram } from "@/lib/format";
 
 const GEO_URL = "/countries-110m.json";
-const PROJECTION = "geoEqualEarth";
-const PROJECTION_CONFIG = { scale: 150, center: [0, 15] as [number, number] };
 
-const MIN_RADIUS = 3;
-const MAX_RADIUS = 9;
+const MIN_RADIUS = 3.5;
+const MAX_RADIUS = 8;
 const VOLATILE_THRESHOLD = 0.03;
-const ARC_SAMPLES = 24;
+const ARC_SAMPLES = 28;
 const BANKRUPT_COLOR = "#5a5a5a";
 
 interface NodeDatum {
@@ -55,15 +48,15 @@ function MarkerNodeBase({
   onSelect: (ticker: string) => void;
 }) {
   const { company, radius, color, pulse } = node;
-  const bankrupt = company.is_bankrupt;
-  const groupOpacity = bankrupt ? 0.3 : 1;
+  const groupOpacity = company.is_bankrupt ? 0.3 : 1;
 
-  // Offset label chip (upper-right of the node).
-  const dx = radius + 7;
-  const dy = -(radius + 7);
+  // White logo-style pill, offset up-right of the glowing node.
+  const dx = radius + 9;
+  const dy = -(radius + 13);
   const mono = monogram(company.name);
-  const chipH = 14;
-  const chipW = 20 + company.name.length * 5.3;
+  const chipH = 17;
+  const padL = 17;
+  const chipW = padL + 8 + company.name.length * 6.1;
 
   return (
     <Marker
@@ -74,59 +67,52 @@ function MarkerNodeBase({
       style={{ default: { cursor: "pointer" }, hover: { cursor: "pointer" }, pressed: {} }}
     >
       <g opacity={groupOpacity}>
-        {/* Glowing halo */}
         <circle
           className={pulse ? "node-pulse" : undefined}
-          r={radius * 2.1}
+          r={radius * 2.2}
           fill={color}
-          opacity={0.28}
+          opacity={0.3}
           style={{ filter: "blur(4px)", pointerEvents: "none" }}
         />
-        {/* Sentiment dot */}
         <circle
           r={radius}
           fill={color}
-          stroke={selected ? "#f5f5f5" : "none"}
-          strokeWidth={selected ? 1.2 : 0}
+          stroke={selected ? "#ffffff" : "none"}
+          strokeWidth={selected ? 1.4 : 0}
           style={{ pointerEvents: "none" }}
         />
-        {/* White glowing core */}
         <circle
-          r={Math.max(1, radius * 0.4)}
+          r={Math.max(1.2, radius * 0.42)}
           fill="#ffffff"
-          opacity={0.9}
+          opacity={0.95}
           style={{ pointerEvents: "none" }}
         />
 
-        {/* Connector + label chip */}
         <line
           x1={0}
           y1={0}
           x2={dx}
-          y2={dy}
-          stroke="var(--map-stroke)"
-          strokeWidth={0.5}
+          y2={dy + chipH / 2}
+          stroke="rgba(255,255,255,0.35)"
+          strokeWidth={0.6}
           style={{ pointerEvents: "none" }}
         />
-        <g transform={`translate(${dx}, ${dy - chipH / 2})`} style={{ pointerEvents: "none" }}>
-          <rect
-            width={chipW}
-            height={chipH}
-            rx={3}
-            fill="rgba(0,0,0,0.6)"
-            stroke="var(--panel-border)"
-            strokeWidth={0.5}
-          />
-          <text x={6} y={chipH / 2 + 3} fontSize={9} fontWeight={700} fill={color}>
-            {mono}
-          </text>
-          <text x={18} y={chipH / 2 + 3} fontSize={9} fill="#e8e8e8">
+        <g transform={`translate(${dx}, ${dy})`} style={{ pointerEvents: "none" }}>
+          <rect width={chipW} height={chipH} rx={4} fill="#f5f5f5" />
+          <circle cx={9} cy={chipH / 2} r={4} fill={color} />
+          <text
+            x={padL}
+            y={chipH / 2 + 3.2}
+            fontSize={10}
+            fontWeight={600}
+            fill="#0a0a0a"
+            fontFamily="var(--font-display)"
+          >
             {company.name}
           </text>
         </g>
 
-        {/* Transparent hit target for hover/click */}
-        <circle r={radius + 5} fill="transparent" />
+        <circle r={radius + 6} fill="transparent" />
       </g>
     </Marker>
   );
@@ -137,20 +123,9 @@ const MarkerNode = memo(MarkerNodeBase);
 function Tooltip({ company }: { company: Company }) {
   return (
     <Marker coordinates={[company.lon, company.lat]} style={{ default: {}, hover: {}, pressed: {} }}>
-      <foreignObject
-        x={12}
-        y={-70}
-        width={190}
-        height={58}
-        style={{ overflow: "visible", pointerEvents: "none" }}
-      >
-        <div
-          className="panel"
-          style={{ padding: "6px 8px", display: "inline-block", lineHeight: 1.35 }}
-        >
-          <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text)" }}>
-            {company.name}
-          </div>
+      <foreignObject x={14} y={-78} width={200} height={64} style={{ overflow: "visible", pointerEvents: "none" }}>
+        <div className="panel" style={{ padding: "6px 9px", display: "inline-block", lineHeight: 1.4, background: "rgba(5,5,5,0.92)" }}>
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--text)" }}>{company.name}</div>
           <div className="tnum" style={{ fontSize: 10.5, color: "var(--text-2)" }}>
             {company.ticker} · {fmtPrice(company.current_price)}
           </div>
@@ -167,6 +142,27 @@ export default function WorldMap() {
   const companies = useCompanyList();
   const selectedTicker = useStore((s) => s.selectedTicker);
   const [hovered, setHovered] = useState<string | null>(null);
+
+  // Measure the container so the map fills it edge-to-edge (no letterboxing).
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const cr = entries[0].contentRect;
+      setSize({ w: Math.round(cr.width), h: Math.round(cr.height) });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // geoEqualEarth spans ~5.4 × scale wide; fill the width and let the poles
+  // clip vertically, matching the reference's wide framing.
+  const scale = size.w > 0 ? size.w / 5.3 : 160;
+  // Framing lives on ZoomableGroup (center) so drag/zoom stay consistent;
+  // the projection only carries scale.
+  const projectionConfig = useMemo(() => ({ scale }), [scale]);
 
   const nodes = useMemo<NodeDatum[]>(() => {
     const caps = companies.filter((c) => c.market_cap > 0).map((c) => Math.log(c.market_cap));
@@ -190,7 +186,8 @@ export default function WorldMap() {
     });
   }, [companies]);
 
-  // Great-circle arcs: chain each company to the next within its sector.
+  // Great-circle arcs: chain each company to the next within its sector, plus
+  // a light cross-sector spine so the "market interconnection" web reads.
   const arcs = useMemo<ArcDatum[]>(() => {
     const bySector = new Map<string, Company[]>();
     for (const c of companies) {
@@ -198,21 +195,23 @@ export default function WorldMap() {
       list.push(c);
       bySector.set(c.sector, list);
     }
-    const out: ArcDatum[] = [];
+    const pairs: [Company, Company][] = [];
     for (const list of Array.from(bySector.values())) {
       const sorted = [...list].sort((a, b) => a.ticker.localeCompare(b.ticker));
-      for (let i = 0; i < sorted.length - 1; i++) {
-        const from = sorted[i];
-        const to = sorted[i + 1];
-        const interp = geoInterpolate([from.lon, from.lat], [to.lon, to.lat]);
-        const coordinates: [number, number][] = [];
-        for (let s = 0; s <= ARC_SAMPLES; s++) {
-          coordinates.push(interp(s / ARC_SAMPLES) as [number, number]);
-        }
-        out.push({ id: `${from.ticker}-${to.ticker}`, coordinates });
-      }
+      for (let i = 0; i < sorted.length - 1; i++) pairs.push([sorted[i], sorted[i + 1]]);
     }
-    return out;
+    // One spine linking the first company of each sector, for global reach.
+    const heads = Array.from(bySector.values())
+      .map((l) => [...l].sort((a, b) => a.ticker.localeCompare(b.ticker))[0])
+      .filter(Boolean);
+    for (let i = 0; i < heads.length - 1; i++) pairs.push([heads[i], heads[i + 1]]);
+
+    return pairs.map(([from, to]) => {
+      const interp = geoInterpolate([from.lon, from.lat], [to.lon, to.lat]);
+      const coordinates: [number, number][] = [];
+      for (let s = 0; s <= ARC_SAMPLES; s++) coordinates.push(interp(s / ARC_SAMPLES) as [number, number]);
+      return { id: `${from.ticker}-${to.ticker}`, coordinates };
+    });
   }, [companies]);
 
   const handleEnter = useCallback((ticker: string) => setHovered(ticker), []);
@@ -224,72 +223,84 @@ export default function WorldMap() {
   const hoveredCompany = hovered ? nodes.find((n) => n.company.ticker === hovered)?.company : undefined;
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "100%" }}>
-      <ComposableMap
-        projection={PROJECTION}
-        projectionConfig={PROJECTION_CONFIG}
-        style={{ width: "100%", height: "100%" }}
-      >
-        <Geographies geography={GEO_URL}>
-          {({ geographies }) =>
-            geographies
-              .filter((geo) => geo.properties?.name !== "Antarctica")
-              .map((geo) => (
-                <Geography
-                  key={geo.rsmKey}
-                  geography={geo}
-                  style={{
-                    default: {
-                      fill: "#0a0a0a",
-                      stroke: "var(--map-stroke)",
-                      strokeWidth: 0.5,
-                      outline: "none",
-                    },
-                    hover: {
-                      fill: "#0a0a0a",
-                      stroke: "var(--map-stroke)",
-                      strokeWidth: 0.5,
-                      outline: "none",
-                    },
-                    pressed: {
-                      fill: "#0a0a0a",
-                      stroke: "var(--map-stroke)",
-                      strokeWidth: 0.5,
-                      outline: "none",
-                    },
-                  }}
-                />
-              ))
-          }
-        </Geographies>
+    <div ref={wrapRef} style={{ position: "relative", width: "100%", height: "100%" }}>
+      {size.w > 0 && (
+        <ComposableMap
+          projection="geoEqualEarth"
+          projectionConfig={projectionConfig}
+          width={size.w}
+          height={size.h}
+          style={{ width: "100%", height: "100%" }}
+        >
+          <ZoomableGroup
+            center={[10, 30]}
+            zoom={1}
+            minZoom={1}
+            maxZoom={8}
+            translateExtent={[
+              [-size.w * 0.5, -size.h * 0.5],
+              [size.w * 1.5, size.h * 1.5],
+            ]}
+          >
+          <Geographies geography={GEO_URL}>
+            {({ geographies }) =>
+              geographies
+                .filter((geo) => geo.properties?.name !== "Antarctica")
+                .map((geo) => (
+                  <Geography
+                    key={geo.rsmKey}
+                    geography={geo}
+                    style={{
+                      default: {
+                        fill: "#080808",
+                        stroke: "var(--map-stroke)",
+                        strokeWidth: 0.5,
+                        outline: "none",
+                      },
+                      hover: {
+                        fill: "rgba(255,255,255,0.09)",
+                        stroke: "rgba(255,255,255,0.5)",
+                        strokeWidth: 0.75,
+                        outline: "none",
+                      },
+                      pressed: {
+                        fill: "rgba(255,255,255,0.14)",
+                        stroke: "rgba(255,255,255,0.6)",
+                        strokeWidth: 0.75,
+                        outline: "none",
+                      },
+                    }}
+                  />
+                ))
+            }
+          </Geographies>
 
-        {/* Sector arcs (behind nodes) */}
-        {arcs.map((arc) => (
-          <Line
-            key={arc.id}
-            coordinates={arc.coordinates}
-            stroke="var(--arc)"
-            strokeWidth={0.6}
-            fill="none"
-            strokeLinecap="round"
-          />
-        ))}
+          {arcs.map((arc) => (
+            <Line
+              key={arc.id}
+              coordinates={arc.coordinates}
+              stroke="var(--arc)"
+              strokeWidth={0.6}
+              fill="none"
+              strokeLinecap="round"
+            />
+          ))}
 
-        {/* Company nodes */}
-        {nodes.map((node) => (
-          <MarkerNode
-            key={node.company.ticker}
-            node={node}
-            selected={node.company.ticker === selectedTicker}
-            onEnter={handleEnter}
-            onLeave={handleLeave}
-            onSelect={handleSelect}
-          />
-        ))}
+          {nodes.map((node) => (
+            <MarkerNode
+              key={node.company.ticker}
+              node={node}
+              selected={node.company.ticker === selectedTicker}
+              onEnter={handleEnter}
+              onLeave={handleLeave}
+              onSelect={handleSelect}
+            />
+          ))}
 
-        {/* Tooltip on top of everything */}
-        {hoveredCompany && <Tooltip company={hoveredCompany} />}
-      </ComposableMap>
+          {hoveredCompany && <Tooltip company={hoveredCompany} />}
+          </ZoomableGroup>
+        </ComposableMap>
+      )}
 
       {companies.length === 0 && (
         <div
@@ -302,14 +313,7 @@ export default function WorldMap() {
             pointerEvents: "none",
           }}
         >
-          <span
-            style={{
-              fontSize: 11,
-              letterSpacing: "0.22em",
-              textTransform: "uppercase",
-              color: "var(--text-3)",
-            }}
-          >
+          <span style={{ fontSize: 11, letterSpacing: "0.22em", textTransform: "uppercase", color: "var(--text-3)" }}>
             Awaiting company nodes
           </span>
         </div>

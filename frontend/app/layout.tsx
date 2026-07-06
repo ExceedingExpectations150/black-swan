@@ -12,7 +12,7 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ChaosNet — Global Intelligence",
+  title: "Black Swan — Global Intelligence",
   description:
     "Neuro-symbolic market simulation: behavioral cohorts vs TimesFM quants trading real companies under macro shocks.",
 };

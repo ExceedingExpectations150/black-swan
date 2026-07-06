@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  /* Layered navy-black atmosphere behind the glass panels. */
+  background-color: #020617;
+  background-image:
+    radial-gradient(1100px 500px at 85% -10%, rgba(16, 185, 129, 0.07), transparent 60%),
+    radial-gradient(900px 480px at 0% 100%, rgba(17, 43, 79, 0.55), transparent 65%),
+    radial-gradient(700px 380px at 50% 45%, rgba(30, 41, 59, 0.35), transparent 70%);
+  background-attachment: fixed;
+}
+
+::selection {
+  background: rgba(16, 185, 129, 0.35);
+}

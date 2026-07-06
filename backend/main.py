@@ -16,7 +16,9 @@ import contextlib
 import logging
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from sqlalchemy import select
 
 from database import SessionLocal, init_db, seed_initial_market_state
@@ -153,12 +155,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="ChaosNet: Black Swan Market Twin", lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5055", "http://localhost:3000"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class EventPayload(BaseModel):
+    headline: str
+
 
 @app.post("/api/start")
 async def start_simulation() -> dict[str, Any]:
     if controller.is_running:
         return {"status": "already_running", "next_tick": controller.next_tick_id}
-    controller.build_engines()
+    try:
+        controller.build_engines()
+    except Exception as exc:
+        # Surface the hard error (missing keys, broken torch, ...) as a real
+        # HTTP response — raw exceptions skip CORSMiddleware and reach the
+        # browser as an opaque "Failed to fetch".
+        logger.exception("AI layer startup failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     controller.load_market_state()
     controller.task = asyncio.create_task(controller.run_loop())
     return {
@@ -178,6 +198,13 @@ async def stop_simulation() -> dict[str, Any]:
         await controller.task
     controller.task = None
     return {"status": "stopped", "last_tick": controller.next_tick_id - 1}
+
+
+@app.post("/api/event")
+async def inject_event(payload: EventPayload) -> dict[str, Any]:
+    """Set the active Black Swan headline fed into every cohort prompt."""
+    controller.active_event = payload.headline.strip()
+    return {"status": "event_set", "headline": controller.active_event}
 
 
 @app.websocket("/ws")

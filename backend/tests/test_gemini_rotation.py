@@ -24,7 +24,7 @@ import aiohttp
 from aiohttp import web
 
 import ai_clients
-from ai_clients import GeminiModelRouter
+from ai_clients import FALLBACK_MODEL, PRIMARY_MODEL, GeminiModelRouter
 
 SEEN: list[dict[str, str]] = []
 
@@ -59,16 +59,16 @@ async def main() -> None:
     ai_clients.BACKOFF_BASE_SECONDS = 0.01
 
     router = GeminiModelRouter()
-    assert router.active_model == "gemma-2-27b-it"
+    assert router.active_model == PRIMARY_MODEL
 
     async with aiohttp.ClientSession() as session:
         text = await router.prompt_cohort(session, "Market crashed 30%. BUY, SELL or HOLD?")
 
     assert text == "HOLD: uncertainty too high", f"unexpected text: {text!r}"
     assert len(SEEN) == 3, f"expected 3 requests, saw {len(SEEN)}"
-    assert SEEN[0] == {"model": "gemma-2-27b-it", "key": "test-key-primary"}
-    assert SEEN[1] == {"model": "gemini-1.5-flash", "key": "test-key-backup"}
-    assert SEEN[2] == {"model": "gemini-1.5-flash", "key": "test-key-primary"}
+    assert SEEN[0] == {"model": PRIMARY_MODEL, "key": "test-key-primary"}
+    assert SEEN[1] == {"model": FALLBACK_MODEL, "key": "test-key-backup"}
+    assert SEEN[2] == {"model": FALLBACK_MODEL, "key": "test-key-primary"}
 
     # Non-429 errors must raise hard, immediately.
     SEEN.clear()

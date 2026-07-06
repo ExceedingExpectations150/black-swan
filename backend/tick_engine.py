@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import statistics
 import uuid
 from typing import Any
@@ -43,25 +44,25 @@ Respond with ONLY a strict JSON object, no markdown, no explanation:
 
 
 def _parse_cohort_decision(raw: str) -> dict[str, Any] | None:
-    """Parse a cohort's strict-JSON decision; None if the reply is unusable."""
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    try:
-        decision = json.loads(text)
-        action = str(decision["action"]).upper()
-        if action == "HOLD":
-            return {"action": "HOLD", "qty": 0, "limit_price": 0.0}
-        qty = int(decision["qty"])
-        limit_price = float(decision["limit_price"])
-        if action not in ("BUY", "SELL") or qty <= 0 or limit_price <= 0:
-            return None
-        return {"action": action, "qty": qty, "limit_price": limit_price}
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-        return None
+    """Parse a cohort's strict-JSON decision; None if the reply is unusable.
+
+    Tolerates markdown fences and reasoning preamble (Gemma 4 often narrates
+    before answering) by validating every JSON-object candidate in the reply
+    and returning the first one that matches the decision schema.
+    """
+    for candidate in re.findall(r"\{.*?\}", raw, flags=re.DOTALL):
+        try:
+            decision = json.loads(candidate)
+            action = str(decision["action"]).upper()
+            if action == "HOLD":
+                return {"action": "HOLD", "qty": 0, "limit_price": 0.0}
+            qty = int(decision["qty"])
+            limit_price = float(decision["limit_price"])
+            if action in ("BUY", "SELL") and qty > 0 and limit_price > 0:
+                return {"action": action, "qty": qty, "limit_price": limit_price}
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            continue
+    return None
 
 
 class TickEngine:

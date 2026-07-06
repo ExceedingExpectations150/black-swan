@@ -24,8 +24,12 @@ load_dotenv()
 GEMINI_ENDPOINT_TEMPLATE: Final[str] = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 )
-PRIMARY_MODEL: Final[str] = "gemma-2-27b-it"
-FALLBACK_MODEL: Final[str] = "gemini-1.5-flash"
+# PRD.md names gemma-2-27b-it / gemini-1.5-flash; both were retired from the
+# Generative Language API (verified via ListModels 2026-07-06). Of the served
+# Gemma models, gemma-4-31b-it consistently returns 500 INTERNAL (also
+# verified live), so the working 26b variant is primary.
+PRIMARY_MODEL: Final[str] = "gemma-4-26b-a4b-it"
+FALLBACK_MODEL: Final[str] = "gemini-2.5-flash"
 MAX_RETRIES: Final[int] = 3
 BACKOFF_BASE_SECONDS: Final[float] = 1.0
 

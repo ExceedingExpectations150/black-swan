@@ -50,6 +50,13 @@ export function useSimulationSocket(url: string = WS_URL) {
           setSocketError(String(payload.error));
           return;
         }
+        if ("type" in payload) {
+          // Envelope events from the multi-ticker backend; this legacy view
+          // only understands flat single-asset telemetry. The world-map UI
+          // (next frontend phase) consumes the envelope stream.
+          if (payload.type === "error") setSocketError(String(payload.payload?.error ?? "error"));
+          return;
+        }
         setTicks((prev) => {
           const next = [...prev, payload as TickTelemetry];
           return next.slice(-MAX_BUFFERED_TICKS);

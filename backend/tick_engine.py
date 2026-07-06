@@ -1,9 +1,20 @@
-"""Simulation tick orchestrator for ChaosNet "Black Swan" (PRD.md Phase 3).
+"""Simulation tick orchestrator for ChaosNet "Black Swan".
 
-One tick = prompt all Gemma retail cohorts in parallel, run the TimesFM
-point forecast for the institutional quants, resolve every order through
-the Continuous Double Auction, settle cash/inventory, flag bankruptcies,
-persist the new WorldState, and return a telemetry payload for WebSockets.
+Multi-ticker orchestration (full per-ticker CDA — the lighter beta-derived
+fallback was NOT chosen; every company clears through the real matching
+engine each tick). Canonical per-tick sequence:
+
+  1. tick_start
+  2. macro news (headline passed in from the controller)
+  3. Corporate PR agents post -> per-company sentiment nudges
+  4. behavioral swarm (batched Gemma calls) -> per-ticker orders
+  5. quant funds (TimesFM per ticker) -> per-ticker orders
+  6. CDA match per ticker -> price_ticks, settlement, bankruptcies
+  7. economy analysis (+ Macro Analyst every N ticks)
+  8. return the ordered WebSocket event list for broadcast
+
+Gemma quota discipline: ONE PR-desk call + ceil(50/10) swarm calls per tick,
+all through the shared 429-rotating router. TimesFM runs locally (free).
 """
 
 from __future__ import annotations
@@ -12,8 +23,8 @@ import asyncio
 import json
 import logging
 import re
-import statistics
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
@@ -22,51 +33,141 @@ from sqlalchemy.orm import Session
 
 from ai_clients import GeminiModelRouter, TimesFMForecaster
 from database import SessionLocal
+from economy import compute_economy_snapshot, persist_economy_snapshot
 from matching_engine import ClearedTransaction, MatchingEngine
-from models import AgentState, AgentType, OrderBook, OrderStatus, OrderType, WorldState
+from models import (
+    AgentHolding,
+    AgentState,
+    AgentType,
+    AuthorType,
+    Company,
+    OrderBook,
+    OrderStatus,
+    OrderType,
+    PriceTick,
+    SocialPost,
+    WorldState,
+)
+from social_agents import CompanyPRContext, CorporatePRDesk, MacroAnalyst, PostDraft
 
 logger = logging.getLogger("chaosnet.tick")
 
-# Fraction of an agent's cash/inventory committed per order.
+COHORT_BATCH_SIZE: int = 10
 RETAIL_MAX_ORDER_FRACTION: float = 0.20
-INSTITUTIONAL_ORDER_FRACTION: float = 0.05
-# Volatility of recent returns is scaled by this factor into the 0-1 stress index.
-STRESS_WINDOW_TICKS: int = 20
-STRESS_SCALE: float = 25.0
+INSTITUTIONAL_CASH_FRACTION_PER_TICKER: float = 0.02
+INSTITUTIONAL_INVENTORY_FRACTION: float = 0.05
+SOCIAL_DIGEST_POSTS: int = 8
+SENTIMENT_CARRYOVER: float = 0.7
+ANALYST_EVERY_N_TICKS: int = 5
+TIMESFM_CONTEXT: int = 512
+# One-sided book pressure: when real orders exist but nothing crosses (e.g.
+# a panic where everyone sells and nobody bids), the indicative price moves
+# this fraction of the way toward the dominant side's best unmatched quote.
+# Deterministic mechanics on real order flow — not a stand-in for the CDA,
+# which still sets the price whenever a trade clears.
+IMBALANCE_PRESSURE: float = 0.25
 
-COHORT_PROMPT_TEMPLATE: str = """You are a retail trading cohort in a stock market simulation.
-Your risk tolerance is {risk:.2f} on a 0-1 scale (0 = very cautious, 1 = very aggressive).
-Current stock price: ${price:.2f}. Your cash: ${cash:.2f}. Your shares: {inventory}.
-Breaking market news: {headline}
-Decide your next trading action for this tick.
-Respond with ONLY a strict JSON object, no markdown, no explanation:
-{{"action": "BUY" | "SELL" | "HOLD", "qty": <positive integer>, "limit_price": <positive float>}}"""
+SWARM_PROMPT_TEMPLATE: str = """You are a JSON API simulating {n} retail trading cohorts in a multi-stock market. You never explain; you only output JSON.
+
+MACRO NEWS: {headline}
+
+MARKET SNAPSHOT (ticker | price | change vs real anchor | crowd sentiment -1..1):
+{market_block}
+
+RECENT SOCIAL FEED:
+{social_block}
+
+COHORTS (index | risk tolerance 0=cautious..1=aggressive | cash | holdings):
+{cohort_block}
+
+For EACH cohort decide zero or more limit orders consistent with its risk
+profile, cash, and holdings. Aggressive cohorts chase momentum and rumors;
+cautious ones de-risk. A cohort may do nothing (empty orders list).
+Do not think out loud. Your ENTIRE reply must be only a strict JSON array
+starting with the character [ and nothing else, exactly this shape:
+[{{"cohort": 0, "orders": [{{"ticker": "AAPL", "action": "BUY", "qty": 10, "limit_price": 232.5}}]}}]"""
 
 
-def _parse_cohort_decision(raw: str) -> dict[str, Any] | None:
-    """Parse a cohort's strict-JSON decision; None if the reply is unusable.
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-    Tolerates markdown fences and reasoning preamble (Gemma 4 often narrates
-    before answering) by validating every JSON-object candidate in the reply
-    and returning the first one that matches the decision schema.
+
+def _event(event_type: str, tick_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    return {"type": event_type, "tick_id": tick_id, "ts": _now_iso(), "payload": payload}
+
+
+def _change_pct(company: Company) -> float:
+    if company.anchor_price == 0:
+        return 0.0
+    return (company.current_price - company.anchor_price) / company.anchor_price * 100.0
+
+
+def _post_payload(post: SocialPost) -> dict[str, Any]:
+    return {
+        "post_id": post.post_id,
+        "tick_id": post.tick_id,
+        "ts": post.ts.isoformat() if post.ts else _now_iso(),
+        "author_type": post.author_type.value,
+        "author_ticker": post.author_ticker,
+        "author_display": post.author_display,
+        "handle": post.handle,
+        "content": post.content,
+        "sentiment": post.sentiment,
+        "likes": post.likes,
+        "reposts": post.reposts,
+    }
+
+
+def parse_swarm_reply(raw: str, n_cohorts: int) -> dict[int, list[dict[str, Any]]]:
+    """Extract per-cohort order lists from a batched swarm reply.
+
+    Tolerates reasoning preamble and fences; validates every order shape.
+    Unknown cohort indices and malformed orders are dropped (an absent
+    decision is a HOLD — nothing is fabricated).
+
+    Selection: real-JSON decode at every '[' position, keep the LAST array
+    whose elements look like cohort entries. Gemma 4 chain-of-thought can
+    contain draft arrays before the answer, and the answer itself NESTS
+    per-cohort "orders" arrays — a plain last-array rule would latch onto
+    an inner (possibly empty) orders list.
     """
-    for candidate in re.findall(r"\{.*?\}", raw, flags=re.DOTALL):
+    decoder = json.JSONDecoder()
+    entries: list[Any] | None = None
+    for match in re.finditer(r"\[", raw):
         try:
-            decision = json.loads(candidate)
-            action = str(decision["action"]).upper()
-            if action == "HOLD":
-                return {"action": "HOLD", "qty": 0, "limit_price": 0.0}
-            qty = int(decision["qty"])
-            limit_price = float(decision["limit_price"])
-            if action in ("BUY", "SELL") and qty > 0 and limit_price > 0:
-                return {"action": action, "qty": qty, "limit_price": limit_price}
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            value, _ = decoder.raw_decode(raw, match.start())
+        except json.JSONDecodeError:
             continue
-    return None
+        if isinstance(value, list) and any(
+            isinstance(e, dict) and "cohort" in e for e in value
+        ):
+            entries = value
+    if entries is None:
+        return {}
+    decisions: dict[int, list[dict[str, Any]]] = {}
+    for entry in entries:
+        try:
+            idx = int(entry["cohort"])
+            if not 0 <= idx < n_cohorts:
+                continue
+            orders: list[dict[str, Any]] = []
+            for o in entry.get("orders", []):
+                action = str(o["action"]).upper()
+                qty = int(o["qty"])
+                limit_price = float(o["limit_price"])
+                ticker = str(o["ticker"]).upper()
+                if action in ("BUY", "SELL") and qty > 0 and limit_price > 0:
+                    orders.append(
+                        {"ticker": ticker, "action": action, "qty": qty, "limit_price": limit_price}
+                    )
+            decisions[idx] = orders
+        except (KeyError, TypeError, ValueError):
+            continue
+    return decisions
 
 
 class TickEngine:
-    """Drives one full market tick across both AI compute layers."""
+    """Drives one full multi-ticker market tick across all AI layers."""
 
     def __init__(
         self,
@@ -79,212 +180,459 @@ class TickEngine:
         self.forecaster = forecaster
         self.matching_engine = matching_engine or MatchingEngine()
         self.session_factory = session_factory
+        self.pr_desk = CorporatePRDesk(router)
+        self.analyst = MacroAnalyst(router)
 
     async def execute_simulation_tick(
-        self,
-        tick_id: int,
-        active_event: str,
-        current_price: float,
-        price_history: list[float],
-    ) -> dict[str, Any]:
-        """Run one tick and return the telemetry payload for broadcasting."""
+        self, tick_id: int, active_event: str
+    ) -> list[dict[str, Any]]:
+        """Run one tick; returns the ordered event list for /ws broadcast."""
+        events: list[dict[str, Any]] = [_event("tick_start", tick_id, {"tick_id": tick_id})]
+        events.append(_event("news", tick_id, {"headline": active_event}))
+
         with self.session_factory() as db:
+            companies: list[Company] = list(
+                db.execute(select(Company).where(Company.is_bankrupt.is_(False))).scalars()
+            )
             agents: list[AgentState] = list(
-                db.execute(
-                    select(AgentState).where(AgentState.is_bankrupt.is_(False))
-                ).scalars()
+                db.execute(select(AgentState).where(AgentState.is_bankrupt.is_(False))).scalars()
             )
             retail = [a for a in agents if a.agent_type == AgentType.GEMMA_RETAIL_COHORT]
-            institutional = [
-                a for a in agents if a.agent_type == AgentType.TIMESFM_INSTITUTIONAL
-            ]
-
-            # Both compute layers run concurrently: Gemma swarm over HTTP,
-            # TimesFM on a worker thread so it doesn't block the event loop.
-            cohort_task = self._prompt_retail_cohorts(retail, active_event, current_price)
-            forecast_task = asyncio.to_thread(
-                self.forecaster.forecast_next_tick, price_history
+            institutional = [a for a in agents if a.agent_type == AgentType.TIMESFM_INSTITUTIONAL]
+            holdings = self._load_holdings(db, agents)
+            recent_posts: list[SocialPost] = list(
+                db.execute(
+                    select(SocialPost).order_by(SocialPost.tick_id.desc()).limit(SOCIAL_DIGEST_POSTS)
+                ).scalars()
             )
-            cohort_decisions, prediction = await asyncio.gather(cohort_task, forecast_task)
+            histories = self._load_price_histories(db, companies)
 
-            orders: list[OrderBook] = []
-            orders += self._build_retail_orders(tick_id, retail, cohort_decisions)
-            orders += self._build_institutional_orders(
-                tick_id, institutional, prediction, current_price
+            async with aiohttp.ClientSession() as http:
+                # 3. Corporate PR agents (one batched call).
+                posts = await self._run_pr_desk(db, http, companies, active_event, tick_id)
+                events += [_event("social_post", tick_id, _post_payload(p)) for p in posts]
+
+                # 4 & 5. Behavioral swarm (batched Gemma) + quant funds
+                # (local TimesFM on a worker thread) run concurrently.
+                swarm_task = self._run_swarm(
+                    http, companies, retail, holdings, recent_posts + posts, active_event, tick_id
+                )
+                quant_task = asyncio.to_thread(self._forecast_all, histories)
+                swarm_orders, forecasts = await asyncio.gather(swarm_task, quant_task)
+
+                orders = swarm_orders + self._build_institutional_orders(
+                    tick_id, institutional, holdings, forecasts, companies
+                )
+
+                # 6. CDA per ticker (the one and only matching engine).
+                price_updates = self._clear_markets(
+                    db, tick_id, companies, orders, agents, holdings
+                )
+                events.append(_event("price_update", tick_id, {"prices": price_updates}))
+
+                # 7. Economy analysis (+ periodic macro analyst).
+                snapshot = compute_economy_snapshot(db, tick_id)
+                if tick_id % ANALYST_EVERY_N_TICKS == 0:
+                    digest = self._economy_digest(snapshot)
+                    narrative = await self.analyst.narrate(http, digest)
+                    if narrative:
+                        snapshot["narrative"] = narrative
+                persist_economy_snapshot(db, snapshot)
+
+            events.append(
+                _event(
+                    "company_update",
+                    tick_id,
+                    {
+                        "companies": [
+                            {
+                                "ticker": c.ticker,
+                                "sentiment": round(c.sentiment, 4),
+                                "volatility": round(c.volatility, 6),
+                                "market_cap": c.current_price * c.shares_outstanding,
+                                "is_bankrupt": c.is_bankrupt,
+                            }
+                            for c in companies
+                        ]
+                    },
+                )
             )
+            events.append(_event("economy_update", tick_id, snapshot))
 
-            clearing_price, transactions, total_volume = (
-                self.matching_engine.resolve_order_book(orders, current_price)
+            # Legacy single-asset world_states row now tracks the sim index
+            # (100 = at anchor) so the original PRD tables keep filling.
+            index_level = 100.0 * (
+                1.0 + sum(_change_pct(c) for c in companies) / (100.0 * max(1, len(companies)))
             )
-
-            self._settle(agents, transactions)
-
-            # Per-tick batch auction: whatever did not fill is dead at tick end.
-            for order in orders:
-                if order.status == OrderStatus.PENDING:
-                    order.status = OrderStatus.CANCELLED
-
-            stress = self._stress_index(price_history + [clearing_price])
-            world_state = WorldState(
-                tick_id=tick_id,
-                current_price=clearing_price,
-                news_headline=active_event,
-                system_stress_index=stress,
+            db.add(
+                WorldState(
+                    tick_id=tick_id,
+                    current_price=index_level,
+                    news_headline=active_event,
+                    system_stress_index=snapshot["system_stress_index"],
+                )
             )
-            db.add(world_state)
-            db.add_all(orders)
             db.commit()
 
-            bankrupt_count = sum(1 for a in agents if a.is_bankrupt)
-            telemetry: dict[str, Any] = {
-                "tick_id": tick_id,
-                "clearing_price": round(clearing_price, 4),
-                "previous_price": round(current_price, 4),
-                "timesfm_prediction": round(float(prediction), 4),
-                "total_volume": total_volume,
-                "cleared_transactions": len(transactions),
-                "orders_submitted": len(orders),
-                "system_stress_index": round(stress, 4),
-                "news_headline": active_event,
-                "agents": {
-                    "retail_active": len(retail),
-                    "institutional_active": len(institutional),
-                    "bankrupt_total": bankrupt_count,
-                },
-                "timestamp": world_state.timestamp.isoformat()
-                if world_state.timestamp
-                else None,
-            }
-            return telemetry
+        events.append(_event("tick_end", tick_id, {"tick_id": tick_id}))
+        return events
 
-    async def _prompt_retail_cohorts(
-        self, retail: list[AgentState], active_event: str, current_price: float
-    ) -> list[dict[str, Any] | None]:
-        """Prompt every Gemma cohort in parallel; returns per-agent decisions."""
-        headline = active_event if active_event else "No major news this tick."
-        async with aiohttp.ClientSession() as session:
+    # ------------------------------------------------------------------ #
+    # PR desk                                                             #
+    # ------------------------------------------------------------------ #
 
-            async def ask(agent: AgentState) -> dict[str, Any] | None:
-                prompt = COHORT_PROMPT_TEMPLATE.format(
-                    risk=agent.risk_tolerance,
-                    price=current_price,
-                    cash=agent.cash_balance,
-                    inventory=agent.stock_inventory,
-                    headline=headline,
-                )
-                try:
-                    raw = await self.router.prompt_cohort(session, prompt)
-                except RuntimeError as exc:
-                    logger.warning("cohort %s failed: %s", agent.agent_id[:8], exc)
-                    return None
-                decision = _parse_cohort_decision(raw)
-                if decision is None:
-                    logger.warning(
-                        "cohort %s returned unparseable decision: %.120s",
-                        agent.agent_id[:8],
-                        raw,
-                    )
-                return decision
-
-            return list(await asyncio.gather(*(ask(a) for a in retail)))
-
-    def _build_retail_orders(
+    async def _run_pr_desk(
         self,
+        db: Session,
+        http: aiohttp.ClientSession,
+        companies: list[Company],
+        headline: str,
         tick_id: int,
-        retail: list[AgentState],
-        decisions: list[dict[str, Any] | None],
-    ) -> list[OrderBook]:
-        orders: list[OrderBook] = []
-        for agent, decision in zip(retail, decisions):
-            if decision is None or decision["action"] == "HOLD":
-                continue
-            qty = decision["qty"]
-            limit_price = decision["limit_price"]
-            if decision["action"] == "BUY":
-                affordable = int(
-                    (agent.cash_balance * RETAIL_MAX_ORDER_FRACTION) / limit_price
-                )
-                qty = min(qty, affordable)
-                order_type = OrderType.BUY
+    ) -> list[SocialPost]:
+        by_sector: dict[str, list[Company]] = {}
+        for c in companies:
+            by_sector.setdefault(c.sector, []).append(c)
+
+        contexts: list[CompanyPRContext] = []
+        for c in companies:
+            peers = [p for p in by_sector[c.sector] if p.ticker != c.ticker]
+            if peers:
+                rival = max(peers, key=lambda p: abs(_change_pct(p)))
+                note = f"{rival.name} is {_change_pct(rival):+.1f}% vs anchor"
             else:
-                qty = min(qty, agent.stock_inventory)
-                order_type = OrderType.SELL
-            if qty <= 0:
-                continue
-            orders.append(
-                OrderBook(
-                    # Set eagerly: the column default only fires at flush, and
-                    # the matching engine needs distinct ids before persistence.
-                    order_id=str(uuid.uuid4()),
-                    tick_id=tick_id,
-                    agent_id=agent.agent_id,
-                    order_type=order_type,
-                    quantity=qty,
-                    limit_price=limit_price,
-                    status=OrderStatus.PENDING,
+                note = "no direct competitor in the index"
+            contexts.append(
+                CompanyPRContext(
+                    ticker=c.ticker,
+                    name=c.name,
+                    sector=c.sector,
+                    price=c.current_price,
+                    change_pct=round(_change_pct(c), 2),
+                    sentiment=round(c.sentiment, 3),
+                    competitor_note=note,
                 )
             )
-        return orders
+
+        try:
+            drafts: list[PostDraft] = await self.pr_desk.generate_posts(
+                http, contexts, headline or "No major macro news."
+            )
+        except RuntimeError as exc:
+            logger.warning("PR desk call failed (tick %d): %s", tick_id, exc)
+            return []
+
+        by_ticker = {c.ticker: c for c in companies}
+        posts: list[SocialPost] = []
+        for d in drafts:
+            company = by_ticker.get(d.ticker)
+            if company is None:
+                continue
+            company.sentiment = max(
+                -1.0,
+                min(1.0, SENTIMENT_CARRYOVER * company.sentiment + (1 - SENTIMENT_CARRYOVER) * d.sentiment),
+            )
+            post = SocialPost(
+                post_id=str(uuid.uuid4()),
+                tick_id=tick_id,
+                author_type=AuthorType.COMPANY,
+                author_ticker=d.ticker,
+                author_display=company.name,
+                handle="@" + re.sub(r"[^a-z0-9]", "", company.name.lower())[:15],
+                content=d.content,
+                sentiment=d.sentiment,
+                likes=int(150 * abs(d.sentiment)) + 25,
+                reposts=(int(150 * abs(d.sentiment)) + 25) // 6,
+            )
+            db.add(post)
+            posts.append(post)
+        return posts
+
+    # ------------------------------------------------------------------ #
+    # Behavioral swarm                                                    #
+    # ------------------------------------------------------------------ #
+
+    async def _run_swarm(
+        self,
+        http: aiohttp.ClientSession,
+        companies: list[Company],
+        retail: list[AgentState],
+        holdings: dict[str, dict[str, int]],
+        feed: list[SocialPost],
+        headline: str,
+        tick_id: int,
+    ) -> list[OrderBook]:
+        market_block = "\n".join(
+            f"{c.ticker} | ${c.current_price:.2f} | {_change_pct(c):+.2f}% | {c.sentiment:+.2f}"
+            for c in companies
+        )
+        social_block = (
+            "\n".join(
+                f"{p.handle}: {p.content[:90]}" for p in feed[-SOCIAL_DIGEST_POSTS:]
+            )
+            or "(feed is quiet)"
+        )
+        known = {c.ticker for c in companies}
+        by_ticker_price = {c.ticker: c.current_price for c in companies}
+
+        async def run_batch(batch: list[AgentState], base: int) -> list[OrderBook]:
+            cohort_block = "\n".join(
+                "{i} | {r:.2f} | ${cash:,.0f} | {h}".format(
+                    i=i,
+                    r=a.risk_tolerance,
+                    cash=a.cash_balance,
+                    h=", ".join(
+                        f"{t}:{q}" for t, q in sorted(holdings[a.agent_id].items()) if q > 0
+                    )
+                    or "none",
+                )
+                for i, a in enumerate(batch)
+            )
+            prompt = SWARM_PROMPT_TEMPLATE.format(
+                n=len(batch),
+                headline=headline or "No major macro news.",
+                market_block=market_block,
+                social_block=social_block,
+                cohort_block=cohort_block,
+            )
+            try:
+                raw = await self.router.prompt_cohort(http, prompt)
+            except RuntimeError as exc:
+                logger.warning("swarm batch @%d failed (tick %d): %s", base, tick_id, exc)
+                return []
+            decisions = parse_swarm_reply(raw, len(batch))
+            if not decisions:
+                logger.warning(
+                    "swarm batch @%d (tick %d): reply yielded no decisions: %.150s",
+                    base,
+                    tick_id,
+                    raw,
+                )
+            built: list[OrderBook] = []
+            for idx, orders in decisions.items():
+                agent = batch[idx]
+                for o in orders:
+                    if o["ticker"] not in known:
+                        continue
+                    qty = o["qty"]
+                    if o["action"] == "BUY":
+                        affordable = int(
+                            agent.cash_balance * RETAIL_MAX_ORDER_FRACTION / o["limit_price"]
+                        )
+                        qty = min(qty, affordable)
+                        side = OrderType.BUY
+                    else:
+                        qty = min(qty, holdings[agent.agent_id].get(o["ticker"], 0))
+                        side = OrderType.SELL
+                    if qty <= 0:
+                        continue
+                    built.append(
+                        OrderBook(
+                            order_id=str(uuid.uuid4()),
+                            tick_id=tick_id,
+                            agent_id=agent.agent_id,
+                            ticker=o["ticker"],
+                            order_type=side,
+                            quantity=qty,
+                            limit_price=o["limit_price"],
+                            status=OrderStatus.PENDING,
+                        )
+                    )
+            return built
+
+        batches = [
+            retail[i : i + COHORT_BATCH_SIZE] for i in range(0, len(retail), COHORT_BATCH_SIZE)
+        ]
+        results = await asyncio.gather(
+            *(run_batch(b, i * COHORT_BATCH_SIZE) for i, b in enumerate(batches))
+        )
+        return [order for sub in results for order in sub]
+
+    # ------------------------------------------------------------------ #
+    # Quant funds                                                         #
+    # ------------------------------------------------------------------ #
+
+    def _forecast_all(self, histories: dict[str, list[float]]) -> dict[str, float]:
+        forecasts: dict[str, float] = {}
+        for ticker, series in histories.items():
+            forecasts[ticker] = self.forecaster.forecast_next_tick(series)
+        return forecasts
 
     def _build_institutional_orders(
         self,
         tick_id: int,
         institutional: list[AgentState],
-        prediction: float,
-        current_price: float,
+        holdings: dict[str, dict[str, int]],
+        forecasts: dict[str, float],
+        companies: list[Company],
     ) -> list[OrderBook]:
-        """Quants trade the TimesFM signal: BUY if forecast > price, else SELL."""
         orders: list[OrderBook] = []
+        by_ticker = {c.ticker: c for c in companies}
         for agent in institutional:
-            if prediction > current_price:
-                qty = int(
-                    (agent.cash_balance * INSTITUTIONAL_ORDER_FRACTION) / prediction
+            for ticker, prediction in forecasts.items():
+                company = by_ticker.get(ticker)
+                if company is None:
+                    continue
+                if prediction > company.current_price:
+                    qty = int(
+                        agent.cash_balance * INSTITUTIONAL_CASH_FRACTION_PER_TICKER / prediction
+                    )
+                    side = OrderType.BUY
+                else:
+                    qty = int(
+                        holdings[agent.agent_id].get(ticker, 0) * INSTITUTIONAL_INVENTORY_FRACTION
+                    )
+                    side = OrderType.SELL
+                if qty <= 0:
+                    continue
+                orders.append(
+                    OrderBook(
+                        order_id=str(uuid.uuid4()),
+                        tick_id=tick_id,
+                        agent_id=agent.agent_id,
+                        ticker=ticker,
+                        order_type=side,
+                        quantity=qty,
+                        limit_price=float(prediction),
+                        status=OrderStatus.PENDING,
+                    )
                 )
-                order_type = OrderType.BUY
-            else:
-                qty = int(agent.stock_inventory * INSTITUTIONAL_ORDER_FRACTION)
-                order_type = OrderType.SELL
-            if qty <= 0:
-                continue
-            orders.append(
-                OrderBook(
-                    order_id=str(uuid.uuid4()),
-                    tick_id=tick_id,
-                    agent_id=agent.agent_id,
-                    order_type=order_type,
-                    quantity=qty,
-                    limit_price=float(prediction),
-                    status=OrderStatus.PENDING,
-                )
-            )
         return orders
 
-    def _settle(
-        self, agents: list[AgentState], transactions: list[ClearedTransaction]
-    ) -> None:
-        """Move cash and inventory for every cleared trade; flag bankruptcies."""
-        by_id: dict[str, AgentState] = {a.agent_id: a for a in agents}
-        for t in transactions:
-            buyer = by_id[t.buyer_agent_id]
-            seller = by_id[t.seller_agent_id]
-            notional = t.quantity * t.price
-            buyer.cash_balance -= notional
-            buyer.stock_inventory += t.quantity
-            seller.cash_balance += notional
-            seller.stock_inventory -= t.quantity
+    # ------------------------------------------------------------------ #
+    # Clearing & settlement                                               #
+    # ------------------------------------------------------------------ #
+
+    def _clear_markets(
+        self,
+        db: Session,
+        tick_id: int,
+        companies: list[Company],
+        orders: list[OrderBook],
+        agents: list[AgentState],
+        holdings: dict[str, dict[str, int]],
+    ) -> list[dict[str, Any]]:
+        by_agent = {a.agent_id: a for a in agents}
+        price_updates: list[dict[str, Any]] = []
+
+        for company in companies:
+            book = [o for o in orders if o.ticker == company.ticker]
+            clearing_price, transactions, volume = self.matching_engine.resolve_order_book(
+                book, company.current_price
+            )
+            if not transactions and book:
+                clearing_price = self._one_sided_pressure(book, company.current_price)
+            for t in transactions:
+                self._settle_transaction(t, company.ticker, by_agent, holdings)
+            for o in book:
+                if o.status == OrderStatus.PENDING:
+                    o.status = OrderStatus.CANCELLED
+
+            company.current_price = clearing_price
+            db.add(
+                PriceTick(
+                    tick_id=tick_id, ticker=company.ticker, price=clearing_price, volume=volume
+                )
+            )
+            price_updates.append(
+                {
+                    "ticker": company.ticker,
+                    "price": round(clearing_price, 4),
+                    "change_pct": round(_change_pct(company), 4),
+                    "volume": volume,
+                }
+            )
+
+        db.add_all(orders)
+        self._flush_holdings(db, holdings)
         for agent in agents:
             if agent.cash_balance <= 0:
                 agent.is_bankrupt = True
+        return price_updates
 
     @staticmethod
-    def _stress_index(prices: list[float]) -> float:
-        """0-1 stress from volatility of recent tick-over-tick returns."""
-        window = prices[-STRESS_WINDOW_TICKS:]
-        if len(window) < 3:
-            return 0.0
-        returns = [
-            (b - a) / a for a, b in zip(window, window[1:]) if a != 0
-        ]
-        if len(returns) < 2:
-            return 0.0
-        return min(1.0, statistics.stdev(returns) * STRESS_SCALE)
+    def _one_sided_pressure(book: list[OrderBook], baseline: float) -> float:
+        """Indicative price for a non-crossing book (see IMBALANCE_PRESSURE)."""
+        buys = [o for o in book if o.order_type == OrderType.BUY]
+        sells = [o for o in book if o.order_type == OrderType.SELL]
+        buy_qty = sum(o.quantity for o in buys)
+        sell_qty = sum(o.quantity for o in sells)
+        if sell_qty > buy_qty and sells:
+            best = min(o.limit_price for o in sells)
+        elif buy_qty > sell_qty and buys:
+            best = max(o.limit_price for o in buys)
+        else:
+            return baseline
+        return baseline + (best - baseline) * IMBALANCE_PRESSURE
+
+    def _settle_transaction(
+        self,
+        t: ClearedTransaction,
+        ticker: str,
+        by_agent: dict[str, AgentState],
+        holdings: dict[str, dict[str, int]],
+    ) -> None:
+        buyer = by_agent[t.buyer_agent_id]
+        seller = by_agent[t.seller_agent_id]
+        notional = t.quantity * t.price
+        buyer.cash_balance -= notional
+        seller.cash_balance += notional
+        holdings[buyer.agent_id][ticker] = holdings[buyer.agent_id].get(ticker, 0) + t.quantity
+        holdings[seller.agent_id][ticker] = holdings[seller.agent_id].get(ticker, 0) - t.quantity
+
+    # ------------------------------------------------------------------ #
+    # State loading / persistence helpers                                 #
+    # ------------------------------------------------------------------ #
+
+    def _load_holdings(
+        self, db: Session, agents: list[AgentState]
+    ) -> dict[str, dict[str, int]]:
+        holdings: dict[str, dict[str, int]] = {a.agent_id: {} for a in agents}
+        for row in db.execute(select(AgentHolding)).scalars():
+            if row.agent_id in holdings:
+                holdings[row.agent_id][row.ticker] = row.quantity
+        return holdings
+
+    def _flush_holdings(self, db: Session, holdings: dict[str, dict[str, int]]) -> None:
+        rows = {(r.agent_id, r.ticker): r for r in db.execute(select(AgentHolding)).scalars()}
+        for agent_id, per_ticker in holdings.items():
+            for ticker, qty in per_ticker.items():
+                row = rows.get((agent_id, ticker))
+                if row is None:
+                    db.add(AgentHolding(agent_id=agent_id, ticker=ticker, quantity=qty))
+                elif row.quantity != qty:
+                    row.quantity = qty
+
+    def _load_price_histories(
+        self, db: Session, companies: list[Company]
+    ) -> dict[str, list[float]]:
+        histories: dict[str, list[float]] = {}
+        for c in companies:
+            rows = list(
+                db.execute(
+                    select(PriceTick.price)
+                    .where(PriceTick.ticker == c.ticker)
+                    .order_by(PriceTick.tick_id.desc())
+                    .limit(TIMESFM_CONTEXT)
+                ).scalars()
+            )
+            rows.reverse()
+            histories[c.ticker] = rows if rows else [c.anchor_price]
+        return histories
+
+    @staticmethod
+    def _economy_digest(snapshot: dict[str, Any]) -> str:
+        sectors = "; ".join(
+            f"{s['sector']} {s['avg_change_pct']:+.1f}% (sent {s['avg_sentiment']:+.2f})"
+            for s in snapshot["sectors"]
+        )
+        gainers = ", ".join(
+            f"{g['ticker']} {g['change_pct']:+.1f}%" for g in snapshot["biggest_gainers"]
+        )
+        losers = ", ".join(
+            f"{g['ticker']} {g['change_pct']:+.1f}%" for g in snapshot["biggest_losers"]
+        )
+        return (
+            f"Stress index {snapshot['system_stress_index']:.2f}. "
+            f"Bankruptcies: {snapshot['bankrupt_count']}. Sectors: {sectors}. "
+            f"Gainers: {gainers or 'none'}. Losers: {losers or 'none'}."
+        )

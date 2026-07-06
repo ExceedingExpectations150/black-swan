@@ -7,3 +7,4 @@ websockets
 torch
 timesfm
 python-dotenv
+yfinance

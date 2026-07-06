@@ -32,6 +32,9 @@ PRIMARY_MODEL: Final[str] = "gemma-4-26b-a4b-it"
 FALLBACK_MODEL: Final[str] = "gemini-2.5-flash"
 MAX_RETRIES: Final[int] = 3
 BACKOFF_BASE_SECONDS: Final[float] = 1.0
+# Gemma 4 reasons in-band before answering; a low output cap truncates the
+# reply BEFORE the final JSON appears (observed live 2026-07-06).
+MAX_OUTPUT_TOKENS: Final[int] = 8192
 
 
 class GeminiModelRouter:
@@ -71,7 +74,10 @@ class GeminiModelRouter:
 
     async def prompt_cohort(self, session: aiohttp.ClientSession, prompt_text: str) -> str:
         """Send one behavioral prompt and return the model's text response."""
-        payload: dict[str, Any] = {"contents": [{"parts": [{"text": prompt_text}]}]}
+        payload: dict[str, Any] = {
+            "contents": [{"parts": [{"text": prompt_text}]}],
+            "generationConfig": {"maxOutputTokens": MAX_OUTPUT_TOKENS},
+        }
         last_status: int = 0
 
         for attempt in range(1 + MAX_RETRIES):

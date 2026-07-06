@@ -24,13 +24,13 @@ RETAIL_COHORT_COUNT: int = 50
 INSTITUTIONAL_COUNT: int = 5
 
 RETAIL_CASH_BASELINE: float = 100_000.0
-RETAIL_INVENTORY_BASELINE: int = 1_000
 RETAIL_RISK_MIN: float = 0.1
 RETAIL_RISK_MAX: float = 0.9
+RETAIL_SHARES_PER_TICKER: int = 40
 
 INSTITUTIONAL_CASH_RESERVE: float = 5_000_000.0
-INSTITUTIONAL_INVENTORY_RESERVE: int = 50_000
 INSTITUTIONAL_RISK_TOLERANCE: float = 0.5
+INSTITUTIONAL_SHARES_PER_TICKER: int = 2_000
 
 
 def _build_engine(url: str) -> Engine:
@@ -61,25 +61,69 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
 
 
-def seed_initial_market_state() -> int:
-    """Populate the agent roster if the market has never been seeded.
+def seed_companies(db: Session) -> int:
+    """Seed the curated company list with REAL anchor prices.
 
-    If `agent_states` is empty, creates exactly 50 "gemma_retail_cohort"
-    agents with randomized risk tolerances (0.1 - 0.9) and 5
-    "timesfm_institutional" agents with large cash/inventory reserves.
-
-    Returns the number of agents created (0 if the table was already seeded).
+    Fetching anchors at seed time is a setup step: if the market data
+    provider cannot return a real price for every ticker, this raises and
+    the seed fails — fabricated prices are forbidden (anti-mock rule).
     """
+    from market_data import CURATED_COMPANIES, YFinanceProvider
+
+    from models import Company
+
+    existing = db.execute(select(Company).limit(1)).scalar_one_or_none()
+    if existing is not None:
+        return 0
+
+    tickers = [c["ticker"] for c in CURATED_COMPANIES]
+    quotes: dict[str, float] = YFinanceProvider().get_quotes(tickers)  # hard-faults on any miss
+
+    for spec in CURATED_COMPANIES:
+        anchor = quotes[spec["ticker"]]
+        db.add(
+            Company(
+                ticker=spec["ticker"],
+                name=spec["name"],
+                sector=spec["sector"],
+                country=spec["country"],
+                city=spec["city"],
+                lat=spec["lat"],
+                lon=spec["lon"],
+                description=spec["description"],
+                shares_outstanding=spec["shares_outstanding"],
+                anchor_price=anchor,
+                current_price=anchor,
+            )
+        )
+    return len(CURATED_COMPANIES)
+
+
+def seed_initial_market_state() -> int:
+    """Populate companies, the agent roster, and holdings if never seeded.
+
+    If `agent_states` is empty: seeds the curated companies (real anchor
+    prices, hard-fault on fetch failure), creates exactly 50
+    "gemma_retail_cohort" agents with randomized risk tolerances (0.1 - 0.9)
+    and 5 "timesfm_institutional" agents with large cash reserves, and gives
+    every agent a deterministic per-ticker starting position.
+
+    Returns the number of agents created (0 if already seeded).
+    """
+    from models import AgentHolding, Company
+
     with SessionLocal() as db:
         existing: AgentState | None = db.execute(select(AgentState).limit(1)).scalar_one_or_none()
         if existing is not None:
             return 0
 
+        seed_companies(db)
+        tickers: list[str] = list(db.execute(select(Company.ticker)).scalars())
+
         agents: list[AgentState] = [
             AgentState(
                 agent_type=AgentType.GEMMA_RETAIL_COHORT,
                 cash_balance=RETAIL_CASH_BASELINE,
-                stock_inventory=RETAIL_INVENTORY_BASELINE,
                 risk_tolerance=round(random.uniform(RETAIL_RISK_MIN, RETAIL_RISK_MAX), 3),
                 is_bankrupt=False,
             )
@@ -89,14 +133,23 @@ def seed_initial_market_state() -> int:
             AgentState(
                 agent_type=AgentType.TIMESFM_INSTITUTIONAL,
                 cash_balance=INSTITUTIONAL_CASH_RESERVE,
-                stock_inventory=INSTITUTIONAL_INVENTORY_RESERVE,
                 risk_tolerance=INSTITUTIONAL_RISK_TOLERANCE,
                 is_bankrupt=False,
             )
             for _ in range(INSTITUTIONAL_COUNT)
         )
-
         db.add_all(agents)
+        db.flush()  # assign agent_ids before holdings reference them
+
+        for agent in agents:
+            per_ticker = (
+                RETAIL_SHARES_PER_TICKER
+                if agent.agent_type == AgentType.GEMMA_RETAIL_COHORT
+                else INSTITUTIONAL_SHARES_PER_TICKER
+            )
+            for ticker in tickers:
+                db.add(AgentHolding(agent_id=agent.agent_id, ticker=ticker, quantity=per_ticker))
+
         db.commit()
         return len(agents)
 

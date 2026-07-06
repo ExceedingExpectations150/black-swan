@@ -10,7 +10,18 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, String
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -73,16 +84,16 @@ class AgentState(Base):
         nullable=False,
     )
     cash_balance: Mapped[float] = mapped_column(Float, nullable=False, default=100_000.0)
-    stock_inventory: Mapped[int] = mapped_column(Integer, nullable=False, default=1_000)
     risk_tolerance: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
     is_bankrupt: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     orders: Mapped[list["OrderBook"]] = relationship(back_populates="agent")
+    holdings: Mapped[list["AgentHolding"]] = relationship(back_populates="agent")
 
     def __repr__(self) -> str:
         return (
             f"<AgentState id={self.agent_id[:8]} type={self.agent_type.value} "
-            f"cash={self.cash_balance:.2f} inventory={self.stock_inventory}>"
+            f"cash={self.cash_balance:.2f}>"
         )
 
 
@@ -94,6 +105,7 @@ class OrderBook(Base):
     order_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_uuid)
     tick_id: Mapped[int] = mapped_column(Integer, ForeignKey("world_states.tick_id"), nullable=False)
     agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent_states.agent_id"), nullable=False)
+    ticker: Mapped[str] = mapped_column(String(16), ForeignKey("companies.ticker"), nullable=False)
     order_type: Mapped[OrderType] = mapped_column(
         Enum(OrderType, values_callable=lambda e: [m.value for m in e], native_enum=False),
         nullable=False,
@@ -114,3 +126,100 @@ class OrderBook(Base):
             f"<OrderBook id={self.order_id[:8]} {self.order_type.value} "
             f"{self.quantity}@{self.limit_price:.2f} status={self.status.value}>"
         )
+
+
+class AuthorType(str, enum.Enum):
+    COMPANY = "company"
+    ANALYST = "analyst"
+    TRADER = "trader"
+
+
+class Company(Base):
+    """A real-world company anchored to a real market price at seed time."""
+
+    __tablename__ = "companies"
+
+    ticker: Mapped[str] = mapped_column(String(16), primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    sector: Mapped[str] = mapped_column(String, nullable=False)
+    country: Mapped[str] = mapped_column(String, nullable=False)
+    city: Mapped[str] = mapped_column(String, nullable=False)
+    lat: Mapped[float] = mapped_column(Float, nullable=False)
+    lon: Mapped[float] = mapped_column(Float, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    shares_outstanding: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    anchor_price: Mapped[float] = mapped_column(Float, nullable=False)
+    current_price: Mapped[float] = mapped_column(Float, nullable=False)
+    sentiment: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    volatility: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    is_bankrupt: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    def __repr__(self) -> str:
+        return f"<Company {self.ticker} price={self.current_price:.2f} sent={self.sentiment:+.2f}>"
+
+
+class AgentHolding(Base):
+    """Per-ticker share position for one agent (replaces scalar inventory)."""
+
+    __tablename__ = "agent_holdings"
+
+    agent_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_states.agent_id"), primary_key=True
+    )
+    ticker: Mapped[str] = mapped_column(
+        String(16), ForeignKey("companies.ticker"), primary_key=True
+    )
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    agent: Mapped[AgentState] = relationship(back_populates="holdings")
+
+
+class PriceTick(Base):
+    """Per-ticker clearing price history (TimesFM context source)."""
+
+    __tablename__ = "price_ticks"
+    __table_args__ = (Index("ix_price_ticks_ticker_tick", "ticker", "tick_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tick_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    ticker: Mapped[str] = mapped_column(String(16), ForeignKey("companies.ticker"), nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    volume: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
+
+
+class SocialPost(Base):
+    """One post on the simulated social feed."""
+
+    __tablename__ = "social_posts"
+
+    post_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_uuid)
+    tick_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
+    author_type: Mapped[AuthorType] = mapped_column(
+        Enum(AuthorType, values_callable=lambda e: [m.value for m in e], native_enum=False),
+        nullable=False,
+    )
+    author_ticker: Mapped[str | None] = mapped_column(
+        String(16), ForeignKey("companies.ticker"), nullable=True
+    )
+    author_display: Mapped[str] = mapped_column(String, nullable=False)
+    handle: Mapped[str] = mapped_column(String, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    sentiment: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    likes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reposts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class EconomySnapshot(Base):
+    """Per-tick quantitative economy rollup plus periodic macro narrative."""
+
+    __tablename__ = "economy_snapshots"
+
+    tick_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
+    system_stress_index: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    bankrupt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sectors_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    movers_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    narrative: Mapped[str] = mapped_column(Text, nullable=False, default="")

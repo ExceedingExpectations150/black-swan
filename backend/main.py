@@ -1,10 +1,12 @@
-"""FastAPI entrypoint for ChaosNet "Black Swan" (PRD.md Phase 3).
+"""FastAPI entrypoint for ChaosNet "Black Swan" — multi-ticker world edition.
 
-POST /api/start  — boots the AI layers (first call loads TimesFM) and starts
-                   the 3-second simulation loop.
-POST /api/stop   — halts the loop.
-WS   /ws         — live telemetry: every tick's payload is broadcast to all
-                   connected dashboard clients.
+REST: /api/state (hydration), /api/companies[/{ticker}[/prices]],
+/api/social, /api/economy, plus the simulation controls
+/api/start, /api/stop, /api/event.
+
+WebSocket /ws: every message uses the shared envelope
+{ "type": "<event>", "tick_id": 0, "ts": "...", "payload": {} } —
+this shape is a frozen cross-team contract with the frontend.
 
 Run: uvicorn main:app --port 8000
 """
@@ -19,20 +21,71 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from database import SessionLocal, init_db, seed_initial_market_state
-from models import WorldState
+from economy import compute_economy_snapshot, snapshot_from_row
+from models import Company, EconomySnapshot, PriceTick, SocialPost, WorldState
 
 logger = logging.getLogger("chaosnet.main")
 
 TICK_INTERVAL_SECONDS: float = 3.0
-INITIAL_PRICE: float = 100.0
-CONTEXT_TICKS: int = 512
+
+
+def _company_payload(company: Company) -> dict[str, Any]:
+    change_pct = (
+        (company.current_price - company.anchor_price) / company.anchor_price * 100.0
+        if company.anchor_price
+        else 0.0
+    )
+    return {
+        "ticker": company.ticker,
+        "name": company.name,
+        "sector": company.sector,
+        "country": company.country,
+        "city": company.city,
+        "lat": company.lat,
+        "lon": company.lon,
+        "description": company.description,
+        "shares_outstanding": company.shares_outstanding,
+        "anchor_price": company.anchor_price,
+        "current_price": company.current_price,
+        "change_pct": round(change_pct, 4),
+        "sentiment": round(company.sentiment, 4),
+        "volatility": round(company.volatility, 6),
+        "market_cap": company.current_price * company.shares_outstanding,
+        "is_bankrupt": company.is_bankrupt,
+    }
+
+
+def _post_payload(post: SocialPost) -> dict[str, Any]:
+    return {
+        "post_id": post.post_id,
+        "tick_id": post.tick_id,
+        "ts": post.ts.isoformat() if post.ts else None,
+        "author_type": post.author_type.value,
+        "author_ticker": post.author_ticker,
+        "author_display": post.author_display,
+        "handle": post.handle,
+        "content": post.content,
+        "sentiment": post.sentiment,
+        "likes": post.likes,
+        "reposts": post.reposts,
+    }
+
+
+def _latest_economy(db: Any) -> dict[str, Any]:
+    row = db.execute(
+        select(EconomySnapshot).order_by(EconomySnapshot.tick_id.desc()).limit(1)
+    ).scalar_one_or_none()
+    if row is not None:
+        return snapshot_from_row(row)
+    latest_tick = db.execute(select(func.max(WorldState.tick_id))).scalar_one() or 0
+    return compute_economy_snapshot(db, latest_tick)
 
 
 class ConnectionManager:
-    """Tracks live WebSocket clients and fans telemetry out to all of them."""
+    """Tracks live WebSocket clients and fans envelope events out to all."""
 
     def __init__(self) -> None:
         self._clients: list[WebSocket] = []
@@ -57,48 +110,28 @@ class ConnectionManager:
 
 
 class SimulationController:
-    """Owns the tick loop, market state, and lazily-built AI engines."""
+    """Owns the tick loop, the active macro event, and the lazy AI engines."""
 
     def __init__(self) -> None:
         self.manager = ConnectionManager()
         self.tick_engine: Any = None
         self.task: asyncio.Task[None] | None = None
         self.active_event: str = ""
-        self.current_price: float = INITIAL_PRICE
-        self.price_history: list[float] = [INITIAL_PRICE]
         self.next_tick_id: int = 1
-        self.last_telemetry: dict[str, Any] | None = None
 
     @property
     def is_running(self) -> bool:
         return self.task is not None and not self.task.done()
 
-    def load_market_state(self) -> None:
-        """Resume price series and tick counter from the database."""
+    def load_tick_counter(self) -> None:
         with SessionLocal() as db:
-            rows = list(
-                db.execute(
-                    select(WorldState.tick_id, WorldState.current_price)
-                    .order_by(WorldState.tick_id.desc())
-                    .limit(CONTEXT_TICKS)
-                ).all()
-            )
-        if rows:
-            rows.reverse()
-            self.price_history = [price for _, price in rows]
-            self.current_price = self.price_history[-1]
-            self.next_tick_id = rows[-1][0] + 1
-        else:
-            self.current_price = INITIAL_PRICE
-            self.price_history = [INITIAL_PRICE]
-            self.next_tick_id = 1
+            latest = db.execute(select(func.max(WorldState.tick_id))).scalar_one()
+        self.next_tick_id = (latest or 0) + 1
 
     def build_engines(self) -> None:
         """Construct the AI layers. Hard-errors without keys/torch by design."""
         if self.tick_engine is not None:
             return
-        # Imported here so the API process can boot (and /api/stop, /ws work)
-        # before the heavy TimesFM checkpoint load happens on first /api/start.
         from ai_clients import GeminiModelRouter, TimesFMForecaster
         from matching_engine import MatchingEngine
         from tick_engine import TickEngine
@@ -112,30 +145,26 @@ class SimulationController:
 
     async def run_loop(self) -> None:
         try:
-            await self._run_loop_inner()
+            while True:
+                events = await self.tick_engine.execute_simulation_tick(
+                    self.next_tick_id, self.active_event
+                )
+                self.next_tick_id += 1
+                for event in events:
+                    await self.manager.broadcast(event)
+                await asyncio.sleep(TICK_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # loop must die loudly, not silently
+        except Exception as exc:  # the loop must die loudly, never silently
             logger.exception("Simulation loop crashed on tick %d", self.next_tick_id)
             await self.manager.broadcast(
-                {"error": f"simulation halted: {exc}", "tick_id": self.next_tick_id}
+                {
+                    "type": "error",
+                    "tick_id": self.next_tick_id,
+                    "ts": "",
+                    "payload": {"error": f"simulation halted: {exc}"},
+                }
             )
-
-    async def _run_loop_inner(self) -> None:
-        while True:
-            telemetry = await self.tick_engine.execute_simulation_tick(
-                tick_id=self.next_tick_id,
-                active_event=self.active_event,
-                current_price=self.current_price,
-                price_history=self.price_history,
-            )
-            self.next_tick_id += 1
-            self.current_price = telemetry["clearing_price"]
-            self.price_history.append(self.current_price)
-            self.price_history = self.price_history[-CONTEXT_TICKS:]
-            self.last_telemetry = telemetry
-            await self.manager.broadcast(telemetry)
-            await asyncio.sleep(TICK_INTERVAL_SECONDS)
 
 
 controller = SimulationController()
@@ -147,7 +176,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     created = seed_initial_market_state()
     if created:
         logger.info("Seeded %d agents into an empty market.", created)
-    controller.load_market_state()
+    controller.load_tick_counter()
     yield
     if controller.is_running and controller.task is not None:
         controller.task.cancel()
@@ -167,6 +196,11 @@ class EventPayload(BaseModel):
     headline: str
 
 
+# --------------------------------------------------------------------- #
+# Simulation controls                                                    #
+# --------------------------------------------------------------------- #
+
+
 @app.post("/api/start")
 async def start_simulation() -> dict[str, Any]:
     if controller.is_running:
@@ -174,18 +208,14 @@ async def start_simulation() -> dict[str, Any]:
     try:
         controller.build_engines()
     except Exception as exc:
-        # Surface the hard error (missing keys, broken torch, ...) as a real
-        # HTTP response — raw exceptions skip CORSMiddleware and reach the
-        # browser as an opaque "Failed to fetch".
         logger.exception("AI layer startup failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    controller.load_market_state()
+    controller.load_tick_counter()
     controller.task = asyncio.create_task(controller.run_loop())
     return {
         "status": "started",
         "tick_interval_seconds": TICK_INTERVAL_SECONDS,
         "next_tick": controller.next_tick_id,
-        "current_price": controller.current_price,
     }
 
 
@@ -207,11 +237,106 @@ async def inject_event(payload: EventPayload) -> dict[str, Any]:
     return {"status": "event_set", "headline": controller.active_event}
 
 
+# --------------------------------------------------------------------- #
+# World data (shared contract with the frontend)                         #
+# --------------------------------------------------------------------- #
+
+
+@app.get("/api/state")
+async def get_state() -> dict[str, Any]:
+    with SessionLocal() as db:
+        companies = list(db.execute(select(Company)).scalars())
+        posts = list(
+            db.execute(select(SocialPost).order_by(SocialPost.tick_id.desc()).limit(50)).scalars()
+        )
+        economy = _latest_economy(db)
+        latest_tick = db.execute(select(func.max(WorldState.tick_id))).scalar_one() or 0
+    return {
+        "companies": [_company_payload(c) for c in companies],
+        "economy": economy,
+        "social": [_post_payload(p) for p in posts],
+        "tick_id": latest_tick,
+    }
+
+
+@app.get("/api/companies")
+async def get_companies() -> dict[str, Any]:
+    with SessionLocal() as db:
+        companies = list(db.execute(select(Company)).scalars())
+    return {"companies": [_company_payload(c) for c in companies]}
+
+
+@app.get("/api/companies/{ticker}")
+async def get_company(ticker: str) -> dict[str, Any]:
+    with SessionLocal() as db:
+        company = db.get(Company, ticker.upper())
+        if company is None:
+            raise HTTPException(status_code=404, detail=f"Unknown ticker {ticker!r}")
+        posts = list(
+            db.execute(
+                select(SocialPost)
+                .where(SocialPost.author_ticker == company.ticker)
+                .order_by(SocialPost.tick_id.desc())
+                .limit(20)
+            ).scalars()
+        )
+        series = list(
+            db.execute(
+                select(PriceTick)
+                .where(PriceTick.ticker == company.ticker)
+                .order_by(PriceTick.tick_id.desc())
+                .limit(512)
+            ).scalars()
+        )
+    payload = _company_payload(company)
+    payload["recent_posts"] = [_post_payload(p) for p in posts]
+    payload["price_series"] = [
+        {"t": row.tick_id, "price": row.price} for row in reversed(series)
+    ]
+    return payload
+
+
+@app.get("/api/companies/{ticker}/prices")
+async def get_company_prices(ticker: str, limit: int = 512) -> dict[str, Any]:
+    limit = max(1, min(limit, 2048))
+    with SessionLocal() as db:
+        company = db.get(Company, ticker.upper())
+        if company is None:
+            raise HTTPException(status_code=404, detail=f"Unknown ticker {ticker!r}")
+        series = list(
+            db.execute(
+                select(PriceTick)
+                .where(PriceTick.ticker == company.ticker)
+                .order_by(PriceTick.tick_id.desc())
+                .limit(limit)
+            ).scalars()
+        )
+    return {
+        "ticker": company.ticker,
+        "prices": [{"t": row.tick_id, "price": row.price} for row in reversed(series)],
+    }
+
+
+@app.get("/api/social")
+async def get_social(limit: int = 50, ticker: str | None = None) -> dict[str, Any]:
+    limit = max(1, min(limit, 200))
+    with SessionLocal() as db:
+        query = select(SocialPost).order_by(SocialPost.tick_id.desc()).limit(limit)
+        if ticker:
+            query = query.where(SocialPost.author_ticker == ticker.upper())
+        posts = list(db.execute(query).scalars())
+    return {"posts": [_post_payload(p) for p in posts]}
+
+
+@app.get("/api/economy")
+async def get_economy() -> dict[str, Any]:
+    with SessionLocal() as db:
+        return _latest_economy(db)
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await controller.manager.connect(websocket)
-    if controller.last_telemetry is not None:
-        await websocket.send_json(controller.last_telemetry)
     try:
         while True:
             # Dashboard clients don't send commands; this keeps the socket

@@ -334,6 +334,14 @@ async def get_economy() -> dict[str, Any]:
         return _latest_economy(db)
 
 
+@app.get("/api/indices")
+async def get_indices_endpoint() -> dict[str, Any]:
+    """Real-market index strip (cached). Empty list if the provider is down."""
+    from market_data import get_indices
+
+    return {"indices": await asyncio.to_thread(get_indices)}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await controller.manager.connect(websocket)

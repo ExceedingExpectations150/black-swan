@@ -10,16 +10,90 @@ raises RuntimeError naming the missing tickers.
 
 from __future__ import annotations
 
+import logging
 import math
-from typing import Protocol
+import time
+from typing import Any, Protocol
 
 import yfinance as yf
+
+logger = logging.getLogger("chaosnet.market_data")
 
 
 class MarketDataProvider(Protocol):
     """Anything that can turn tickers into real last prices."""
 
     def get_quotes(self, tickers: list[str]) -> dict[str, float]: ...
+
+
+# Real-market index strip for the dashboard top bar. Yahoo symbols.
+INDEX_SYMBOLS: list[dict[str, str]] = [
+    {"symbol": "^GSPC", "name": "S&P 500"},
+    {"symbol": "^IXIC", "name": "NASDAQ"},
+    {"symbol": "^DJI", "name": "DOW JONES"},
+    {"symbol": "^FTSE", "name": "FTSE 100"},
+    {"symbol": "^N225", "name": "NIKKEI 225"},
+]
+
+_INDEX_CACHE_TTL_SECONDS: float = 60.0
+_index_cache: dict[str, Any] = {"ts": 0.0, "data": []}
+
+
+def get_indices() -> list[dict[str, Any]]:
+    """Return the real-market index strip, cached for a minute.
+
+    Best-effort by design: a provider failure logs loudly and returns the
+    last good cache (or []). The frontend renders "—" for an empty strip —
+    values are never fabricated. Each entry:
+    {symbol, name, value, change, change_pct, sparkline: [floats]}.
+    """
+    now = time.monotonic()
+    if _index_cache["data"] and now - _index_cache["ts"] < _INDEX_CACHE_TTL_SECONDS:
+        return _index_cache["data"]
+
+    symbols = [entry["symbol"] for entry in INDEX_SYMBOLS]
+    try:
+        frame = yf.download(
+            tickers=symbols,
+            period="5d",
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+            group_by="ticker",
+        )
+    except Exception as exc:  # network / provider hiccup — non-fatal refresh
+        logger.warning("index refresh failed: %s", exc)
+        return _index_cache["data"]
+
+    result: list[dict[str, Any]] = []
+    for entry in INDEX_SYMBOLS:
+        symbol = entry["symbol"]
+        try:
+            closes = frame[symbol]["Close"].dropna() if len(symbols) > 1 else frame["Close"].dropna()
+            values = [float(v) for v in closes.tolist() if v == v and v > 0]
+        except (KeyError, IndexError, TypeError):
+            values = []
+        if len(values) < 2:
+            continue  # skip a symbol we can't resolve; never fabricate it
+        value = values[-1]
+        prev = values[-2]
+        change = value - prev
+        change_pct = (change / prev * 100.0) if prev else 0.0
+        result.append(
+            {
+                "symbol": symbol,
+                "name": entry["name"],
+                "value": round(value, 2),
+                "change": round(change, 2),
+                "change_pct": round(change_pct, 2),
+                "sparkline": [round(v, 2) for v in values[-30:]],
+            }
+        )
+
+    if result:
+        _index_cache["ts"] = now
+        _index_cache["data"] = result
+    return result or _index_cache["data"]
 
 
 class YFinanceProvider:

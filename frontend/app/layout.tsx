@@ -12,9 +12,9 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ChaosNet — Black Swan Market Twin",
+  title: "ChaosNet — Global Intelligence",
   description:
-    "Neuro-symbolic market simulation: Gemma behavioral cohorts vs TimesFM quants under macro shocks.",
+    "Neuro-symbolic market simulation: behavioral cohorts vs TimesFM quants trading real companies under macro shocks.",
 };
 
 export default function RootLayout({
@@ -25,7 +25,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <body
-        className={`${spaceGrotesk.variable} ${jetbrainsMono.variable} min-h-screen bg-slate-950 font-display text-slate-200 antialiased`}
+        className={`${spaceGrotesk.variable} ${jetbrainsMono.variable} bg-black font-display text-ink antialiased`}
       >
         {children}
       </body>

@@ -2,16 +2,110 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ChaosNet — Global Intelligence terminal. Near-monochrome, black canvas,
+   green/red semantics only, generous negative space. */
+:root {
+  --bg: #000000;
+  --panel: rgba(255, 255, 255, 0.028);
+  --panel-border: rgba(255, 255, 255, 0.07);
+  --text: #f5f5f5;
+  --text-2: #8b8b8b;
+  --text-3: #5a5a5a;
+  --up: #16c60c;
+  --down: #ff4d4f;
+  --map-stroke: rgba(255, 255, 255, 0.18);
+  --arc: rgba(255, 255, 255, 0.12);
+}
+
+html,
 body {
-  /* Layered navy-black atmosphere behind the glass panels. */
-  background-color: #020617;
-  background-image:
-    radial-gradient(1100px 500px at 85% -10%, rgba(16, 185, 129, 0.07), transparent 60%),
-    radial-gradient(900px 480px at 0% 100%, rgba(17, 43, 79, 0.55), transparent 65%),
-    radial-gradient(700px 380px at 50% 45%, rgba(30, 41, 59, 0.35), transparent 70%);
-  background-attachment: fixed;
+  height: 100%;
+  background: #000000;
+  color: var(--text);
+  overflow: hidden; /* fixed full-viewport terminal — no page scroll */
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+}
+
+.section-title {
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.up {
+  color: var(--up);
+}
+.down {
+  color: var(--down);
+}
+
+/* Thin custom scrollbars inside panels (feeds, tables). */
+.scroll-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+}
+.scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@keyframes node-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.35);
+  }
+}
+.node-pulse {
+  animation: node-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes live-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+.live-dot {
+  animation: live-dot 1.4s ease-in-out infinite;
+}
+
+@keyframes post-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.post-enter {
+  animation: post-enter 0.35s ease-out;
 }
 
 ::selection {
-  background: rgba(16, 185, 129, 0.35);
+  background: rgba(22, 198, 12, 0.3);
 }

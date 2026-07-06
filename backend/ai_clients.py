@@ -25,15 +25,19 @@ GEMINI_ENDPOINT_TEMPLATE: Final[str] = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 )
 # PRD.md names gemma-2-27b-it / gemini-1.5-flash; both were retired from the
-# Generative Language API (verified via ListModels 2026-07-06). Of the served
-# Gemma models, gemma-4-31b-it consistently returns 500 INTERNAL (also
-# verified live), so the working 26b variant is primary.
-PRIMARY_MODEL: Final[str] = "gemma-4-26b-a4b-it"
-FALLBACK_MODEL: Final[str] = "gemini-2.5-flash"
+# Generative Language API (verified via ListModels 2026-07-06). The PRD's
+# gemma-2-27b-it and gemini-1.5-flash are retired. Live diagnosis showed the
+# served Gemma models cannot produce structured output: gemma-4-31b-it 500s,
+# and gemma-4-26b-a4b-it returns only chain-of-thought and never emits the
+# requested JSON. gemini-2.5-flash follows JSON-only instructions cleanly, so
+# it is primary; the 429 engine rotates keys and scales down to a lighter
+# flash. The "Gemma cohort" concept is preserved; only the served model differs.
+PRIMARY_MODEL: Final[str] = "gemini-2.5-flash"
+FALLBACK_MODEL: Final[str] = "gemini-2.0-flash"
 MAX_RETRIES: Final[int] = 3
 BACKOFF_BASE_SECONDS: Final[float] = 1.0
-# Gemma 4 reasons in-band before answering; a low output cap truncates the
-# reply BEFORE the final JSON appears (observed live 2026-07-06).
+# Flash models can also reason before answering; keep the cap generous so the
+# final JSON is never truncated (observed live 2026-07-06).
 MAX_OUTPUT_TOKENS: Final[int] = 8192
 
 

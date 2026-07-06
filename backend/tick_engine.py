@@ -52,7 +52,11 @@ from social_agents import CompanyPRContext, CorporatePRDesk, MacroAnalyst, PostD
 
 logger = logging.getLogger("chaosnet.tick")
 
-COHORT_BATCH_SIZE: int = 10
+# All cohorts in ONE Gemini call per tick. Free-tier flash allows ~5
+# requests/min, so a tick's LLM footprint must stay tiny: this makes it
+# 1 PR-desk call + 1 swarm call. Flash handles all 50 cohorts in a single
+# JSON array well within the context window.
+COHORT_BATCH_SIZE: int = 50
 RETAIL_MAX_ORDER_FRACTION: float = 0.20
 INSTITUTIONAL_CASH_FRACTION_PER_TICKER: float = 0.02
 INSTITUTIONAL_INVENTORY_FRACTION: float = 0.05

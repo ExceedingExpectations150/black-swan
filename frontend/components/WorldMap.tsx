@@ -10,14 +10,15 @@ import {
 } from "react-simple-maps";
 import type { Company } from "@/lib/types";
 import { useStore, useCompanyList } from "@/lib/store";
-import { sentimentColor, fmtPrice, fmtPct, changeClass, monogram } from "@/lib/format";
+import { fmtPrice, fmtPct, changeClass } from "@/lib/format";
 
-const GEO_URL = "/countries-110m.json";
+const GEO_URL = "/countries-50m.json"; // higher-detail coastlines/borders
 
 const MIN_RADIUS = 3.5;
 const MAX_RADIUS = 8;
 const VOLATILE_THRESHOLD = 0.03;
 const BANKRUPT_COLOR = "#5a5a5a";
+const NODE_GREEN = "#16c60c";
 
 interface NodeDatum {
   company: Company;
@@ -43,11 +44,12 @@ function MarkerNodeBase({
 }) {
   const { company, radius, color, pulse } = node;
   const groupOpacity = company.is_bankrupt ? 0.3 : 1;
+  // Small square; keep a faint market-cap size cue but stay compact.
+  const side = Math.max(5, radius * 1.25);
 
-  // White logo-style pill, offset up-right of the glowing node.
-  const dx = radius + 9;
-  const dy = -(radius + 13);
-  const mono = monogram(company.name);
+  // White logo-style pill, offset up-right of the node.
+  const dx = side + 8;
+  const dy = -(side + 11);
   const chipH = 17;
   const padL = 17;
   const chipW = padL + 8 + company.name.length * 6.1;
@@ -61,24 +63,26 @@ function MarkerNodeBase({
       style={{ default: { cursor: "pointer" }, hover: { cursor: "pointer" }, pressed: {} }}
     >
       <g opacity={groupOpacity}>
-        <circle
+        {/* Soft green glow behind the square */}
+        <rect
           className={pulse ? "node-pulse" : undefined}
-          r={radius * 2.2}
+          x={-side * 1.15}
+          y={-side * 1.15}
+          width={side * 2.3}
+          height={side * 2.3}
           fill={color}
-          opacity={0.3}
-          style={{ filter: "blur(4px)", pointerEvents: "none" }}
+          opacity={0.28}
+          style={{ filter: "blur(3.5px)", pointerEvents: "none" }}
         />
-        <circle
-          r={radius}
+        {/* Small green square */}
+        <rect
+          x={-side / 2}
+          y={-side / 2}
+          width={side}
+          height={side}
           fill={color}
-          stroke={selected ? "#ffffff" : "none"}
-          strokeWidth={selected ? 1.4 : 0}
-          style={{ pointerEvents: "none" }}
-        />
-        <circle
-          r={Math.max(1.2, radius * 0.42)}
-          fill="#ffffff"
-          opacity={0.95}
+          stroke={selected ? "#ffffff" : "rgba(255,255,255,0.4)"}
+          strokeWidth={selected ? 1.4 : 0.5}
           style={{ pointerEvents: "none" }}
         />
 
@@ -178,7 +182,7 @@ export default function WorldMap() {
       return {
         company: c,
         radius,
-        color: c.is_bankrupt ? BANKRUPT_COLOR : sentimentColor(c.sentiment),
+        color: c.is_bankrupt ? BANKRUPT_COLOR : NODE_GREEN,
         pulse: !c.is_bankrupt && c.volatility > VOLATILE_THRESHOLD,
       };
     });
@@ -204,12 +208,12 @@ export default function WorldMap() {
         >
           <ZoomableGroup
             center={[10, 30]}
-            zoom={1}
+            zoom={1.4}
             minZoom={1}
-            maxZoom={8}
+            maxZoom={20}
             translateExtent={[
-              [-size.w * 0.5, -size.h * 0.5],
-              [size.w * 1.5, size.h * 1.5],
+              [-size.w * 0.6, -size.h * 0.6],
+              [size.w * 1.6, size.h * 1.6],
             ]}
           >
           <Geographies geography={GEO_URL}>

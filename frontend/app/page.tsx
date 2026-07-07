@@ -12,6 +12,7 @@ import SocialFeed from "@/components/SocialFeed";
 import EconomyPanel from "@/components/EconomyPanel";
 import CompanyDetail from "@/components/CompanyDetail";
 import StockMarketView from "@/components/StockMarketView";
+import BootTerminal from "@/components/BootTerminal";
 
 // react-simple-maps is client-only; skip SSR to avoid window/hydration issues.
 const WorldMap = dynamic(() => import("@/components/WorldMap"), {
@@ -26,7 +27,12 @@ const WorldMap = dynamic(() => import("@/components/WorldMap"), {
 export default function Home() {
   useLiveConnection();
   const [nav, setNav] = useState<NavKey>("dashboard");
+  const [booted, setBooted] = useState(false);
   const news = useStore((s) => s.news);
+
+  if (!booted) {
+    return <BootTerminal onLaunch={() => setBooted(true)} />;
+  }
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-black">

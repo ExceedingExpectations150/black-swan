@@ -77,10 +77,16 @@ def seed_companies(db: Session) -> int:
         return 0
 
     tickers = [c["ticker"] for c in CURATED_COMPANIES]
-    quotes: dict[str, float] = YFinanceProvider().get_quotes(tickers)  # hard-faults on any miss
+    # Tolerant: skip any individual symbol that can't be priced (never
+    # fabricated); raises only if the provider returns nothing at all.
+    quotes: dict[str, float] = YFinanceProvider().get_quotes_available(tickers)
 
+    seeded = 0
     for spec in CURATED_COMPANIES:
-        anchor = quotes[spec["ticker"]]
+        anchor = quotes.get(spec["ticker"])
+        if anchor is None:
+            continue  # unresolved ticker — not seeded, not fabricated
+        seeded += 1
         db.add(
             Company(
                 ticker=spec["ticker"],
@@ -96,7 +102,7 @@ def seed_companies(db: Session) -> int:
                 current_price=anchor,
             )
         )
-    return len(CURATED_COMPANIES)
+    return seeded
 
 
 def seed_initial_market_state() -> int:

@@ -1,12 +1,10 @@
 "use client";
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { geoInterpolate } from "d3-geo";
 import {
   ComposableMap,
   Geographies,
   Geography,
-  Line,
   Marker,
   ZoomableGroup,
 } from "react-simple-maps";
@@ -19,7 +17,6 @@ const GEO_URL = "/countries-110m.json";
 const MIN_RADIUS = 3.5;
 const MAX_RADIUS = 8;
 const VOLATILE_THRESHOLD = 0.03;
-const ARC_SAMPLES = 28;
 const BANKRUPT_COLOR = "#5a5a5a";
 
 interface NodeDatum {
@@ -29,20 +26,17 @@ interface NodeDatum {
   pulse: boolean;
 }
 
-interface ArcDatum {
-  id: string;
-  coordinates: [number, number][];
-}
-
 function MarkerNodeBase({
   node,
   selected,
+  showLabel,
   onEnter,
   onLeave,
   onSelect,
 }: {
   node: NodeDatum;
   selected: boolean;
+  showLabel: boolean;
   onEnter: (ticker: string) => void;
   onLeave: () => void;
   onSelect: (ticker: string) => void;
@@ -88,29 +82,33 @@ function MarkerNodeBase({
           style={{ pointerEvents: "none" }}
         />
 
-        <line
-          x1={0}
-          y1={0}
-          x2={dx}
-          y2={dy + chipH / 2}
-          stroke="rgba(255,255,255,0.35)"
-          strokeWidth={0.6}
-          style={{ pointerEvents: "none" }}
-        />
-        <g transform={`translate(${dx}, ${dy})`} style={{ pointerEvents: "none" }}>
-          <rect width={chipW} height={chipH} rx={4} fill="#f5f5f5" />
-          <circle cx={9} cy={chipH / 2} r={4} fill={color} />
-          <text
-            x={padL}
-            y={chipH / 2 + 3.2}
-            fontSize={10}
-            fontWeight={600}
-            fill="#0a0a0a"
-            fontFamily="var(--font-display)"
-          >
-            {company.name}
-          </text>
-        </g>
+        {(showLabel || selected) && (
+          <>
+            <line
+              x1={0}
+              y1={0}
+              x2={dx}
+              y2={dy + chipH / 2}
+              stroke="rgba(255,255,255,0.35)"
+              strokeWidth={0.6}
+              style={{ pointerEvents: "none" }}
+            />
+            <g transform={`translate(${dx}, ${dy})`} style={{ pointerEvents: "none" }}>
+              <rect width={chipW} height={chipH} rx={4} fill="#f5f5f5" />
+              <circle cx={9} cy={chipH / 2} r={4} fill={color} />
+              <text
+                x={padL}
+                y={chipH / 2 + 3.2}
+                fontSize={10}
+                fontWeight={600}
+                fill="#0a0a0a"
+                fontFamily="var(--font-display)"
+              >
+                {company.name}
+              </text>
+            </g>
+          </>
+        )}
 
         <circle r={radius + 6} fill="transparent" />
       </g>
@@ -186,34 +184,6 @@ export default function WorldMap() {
     });
   }, [companies]);
 
-  // Great-circle arcs: chain each company to the next within its sector, plus
-  // a light cross-sector spine so the "market interconnection" web reads.
-  const arcs = useMemo<ArcDatum[]>(() => {
-    const bySector = new Map<string, Company[]>();
-    for (const c of companies) {
-      const list = bySector.get(c.sector) ?? [];
-      list.push(c);
-      bySector.set(c.sector, list);
-    }
-    const pairs: [Company, Company][] = [];
-    for (const list of Array.from(bySector.values())) {
-      const sorted = [...list].sort((a, b) => a.ticker.localeCompare(b.ticker));
-      for (let i = 0; i < sorted.length - 1; i++) pairs.push([sorted[i], sorted[i + 1]]);
-    }
-    // One spine linking the first company of each sector, for global reach.
-    const heads = Array.from(bySector.values())
-      .map((l) => [...l].sort((a, b) => a.ticker.localeCompare(b.ticker))[0])
-      .filter(Boolean);
-    for (let i = 0; i < heads.length - 1; i++) pairs.push([heads[i], heads[i + 1]]);
-
-    return pairs.map(([from, to]) => {
-      const interp = geoInterpolate([from.lon, from.lat], [to.lon, to.lat]);
-      const coordinates: [number, number][] = [];
-      for (let s = 0; s <= ARC_SAMPLES; s++) coordinates.push(interp(s / ARC_SAMPLES) as [number, number]);
-      return { id: `${from.ticker}-${to.ticker}`, coordinates };
-    });
-  }, [companies]);
-
   const handleEnter = useCallback((ticker: string) => setHovered(ticker), []);
   const handleLeave = useCallback(() => setHovered(null), []);
   const handleSelect = useCallback((ticker: string) => {
@@ -275,22 +245,12 @@ export default function WorldMap() {
             }
           </Geographies>
 
-          {arcs.map((arc) => (
-            <Line
-              key={arc.id}
-              coordinates={arc.coordinates}
-              stroke="var(--arc)"
-              strokeWidth={0.6}
-              fill="none"
-              strokeLinecap="round"
-            />
-          ))}
-
           {nodes.map((node) => (
             <MarkerNode
               key={node.company.ticker}
               node={node}
               selected={node.company.ticker === selectedTicker}
+              showLabel={node.company.ticker === hovered}
               onEnter={handleEnter}
               onLeave={handleLeave}
               onSelect={handleSelect}

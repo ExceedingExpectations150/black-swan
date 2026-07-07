@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -184,9 +185,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="ChaosNet: Black Swan Market Twin", lifespan=lifespan)
 
+# Allowed browser origins — comma-separated ALLOWED_ORIGINS in production
+# (e.g. the deployed Vercel URL); defaults to local dev.
+_origins_env = os.getenv(
+    "ALLOWED_ORIGINS", "http://localhost:5055,http://localhost:3000"
+)
+ALLOWED_ORIGINS = [o.strip() for o in _origins_env.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5055", "http://localhost:3000"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )

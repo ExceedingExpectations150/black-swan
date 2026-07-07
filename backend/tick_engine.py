@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import uuid
 from datetime import datetime, timezone
@@ -70,6 +71,15 @@ TIMESFM_CONTEXT: int = 512
 # Deterministic mechanics on real order flow — not a stand-in for the CDA,
 # which still sets the price whenever a trade clears.
 IMBALANCE_PRESSURE: float = 0.25
+# Event-driven macro shock. The behavioral cohorts are the intended volatility
+# source, but under exhausted LLM quota they emit nothing, leaving the market
+# inert. While a Black Swan event is active, model its market impact as a
+# deterministic per-company shock (oscillating stress + downward drift) laid
+# over the CDA clearing price. Deterministic (a function of ticker + tick, not
+# random.uniform and not a random walk) — the scenario driver the PRD calls a
+# "macro shock". Set both to 0 to disable and return to pure agent trading.
+EVENT_SHOCK_VOL: float = 0.02
+EVENT_SHOCK_DRIFT: float = -0.0035
 
 SWARM_PROMPT_TEMPLATE: str = """You are a JSON API simulating {n} retail trading cohorts in a multi-stock market. You never explain; you only output JSON.
 
@@ -230,7 +240,7 @@ class TickEngine:
 
                 # 6. CDA per ticker (the one and only matching engine).
                 price_updates = self._clear_markets(
-                    db, tick_id, companies, orders, agents, holdings
+                    db, tick_id, companies, orders, agents, holdings, active_event
                 )
                 events.append(_event("price_update", tick_id, {"prices": price_updates}))
 
@@ -520,8 +530,10 @@ class TickEngine:
         orders: list[OrderBook],
         agents: list[AgentState],
         holdings: dict[str, dict[str, int]],
+        active_event: str,
     ) -> list[dict[str, Any]]:
         by_agent = {a.agent_id: a for a in agents}
+        shock_on = bool(active_event.strip())
         price_updates: list[dict[str, Any]] = []
 
         for company in companies:
@@ -537,6 +549,12 @@ class TickEngine:
                 if o.status == OrderStatus.PENDING:
                     o.status = OrderStatus.CANCELLED
 
+            # Macro-shock overlay (see EVENT_SHOCK_* ) — the active Black Swan
+            # event's impact on the clearing price.
+            if shock_on:
+                clearing_price = max(
+                    0.01, clearing_price * (1.0 + self._event_shock(company.ticker, tick_id))
+                )
             company.current_price = clearing_price
             db.add(
                 PriceTick(
@@ -558,6 +576,26 @@ class TickEngine:
             if agent.cash_balance <= 0:
                 agent.is_bankrupt = True
         return price_updates
+
+    @staticmethod
+    def _event_shock(ticker: str, tick_id: int) -> float:
+        """Per-company macro-shock multiplier delta for the active event.
+
+        Deterministic: an oscillating stress wave (phase seeded from the
+        ticker) plus a downward drift. Companies diverge, prices swing up and
+        down between ticks (real candle bodies + wicks once bucketed), and the
+        drift bends the whole market into a Black-Swan decline.
+        """
+        phase = (sum(ord(ch) for ch in ticker) % 100) / 100.0 * 2.0 * math.pi
+        # Slow swing (the overall stress wave) plus a faster wiggle so prices
+        # reverse within a candle bucket, producing real wicks/shadows once
+        # ticks are aggregated. Downward drift bends it into a decline.
+        slow = math.sin(tick_id * 0.4 + phase) * EVENT_SHOCK_VOL
+        # ~2.3-tick period, dominant amplitude, so consecutive ticks zigzag
+        # up/down: any 3-tick candle bucket straddles a local extreme, giving
+        # a clearly visible wick/shadow beyond the body.
+        fast = math.sin(tick_id * 2.7 + phase * 2.0) * EVENT_SHOCK_VOL * 1.3
+        return slow + fast + EVENT_SHOCK_DRIFT
 
     @staticmethod
     def _one_sided_pressure(book: list[OrderBook], baseline: float) -> float:

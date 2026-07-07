@@ -44,8 +44,8 @@ function MarkerNodeBase({
 }) {
   const { company, radius, color, pulse } = node;
   const groupOpacity = company.is_bankrupt ? 0.3 : 1;
-  // Small square; keep a faint market-cap size cue but stay compact.
-  const side = Math.max(5, radius * 1.25);
+  // Small flat square; faint market-cap size cue, kept tiny.
+  const side = Math.max(3, radius * 0.7);
 
   // White logo-style pill, offset up-right of the node.
   const dx = side + 8;
@@ -63,26 +63,16 @@ function MarkerNodeBase({
       style={{ default: { cursor: "pointer" }, hover: { cursor: "pointer" }, pressed: {} }}
     >
       <g opacity={groupOpacity}>
-        {/* Soft green glow behind the square */}
+        {/* Small flat green square (no glow) */}
         <rect
           className={pulse ? "node-pulse" : undefined}
-          x={-side * 1.15}
-          y={-side * 1.15}
-          width={side * 2.3}
-          height={side * 2.3}
-          fill={color}
-          opacity={0.28}
-          style={{ filter: "blur(3.5px)", pointerEvents: "none" }}
-        />
-        {/* Small green square */}
-        <rect
           x={-side / 2}
           y={-side / 2}
           width={side}
           height={side}
           fill={color}
-          stroke={selected ? "#ffffff" : "rgba(255,255,255,0.4)"}
-          strokeWidth={selected ? 1.4 : 0.5}
+          stroke={selected ? "#ffffff" : "none"}
+          strokeWidth={selected ? 1.2 : 0}
           style={{ pointerEvents: "none" }}
         />
 

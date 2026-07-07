@@ -8,7 +8,6 @@ import {
   BarChart3,
   Bell,
   Star,
-  ChevronRight,
   Circle,
 } from "lucide-react";
 import { useStore, useCompanyList } from "@/lib/store";
@@ -108,16 +107,6 @@ export default function Sidebar({
         </div>
       </div>
 
-      <div className="flex items-center gap-2.5 rounded-md border border-hair px-2.5 py-2">
-        <div className="flex h-7 w-7 items-center justify-center rounded-full bg-white/10 text-[11px] text-ink">
-          MM
-        </div>
-        <div className="min-w-0 flex-1 leading-none">
-          <div className="truncate text-xs text-ink">Applogica</div>
-          <div className="mt-0.5 text-[10px] text-ink3">Terminal · Pro</div>
-        </div>
-        <ChevronRight size={14} className="text-ink3" />
-      </div>
     </aside>
   );
 }

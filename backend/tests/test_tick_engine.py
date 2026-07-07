@@ -41,7 +41,13 @@ from models import (
     SocialPost,
     WorldState,
 )
+import tick_engine
 from tick_engine import TickEngine
+
+# This test asserts exact CDA-cleared prices, so disable the event macro-shock
+# overlay (verified separately) to keep the clearing math deterministic.
+tick_engine.EVENT_SHOCK_VOL = 0.0
+tick_engine.EVENT_SHOCK_DRIFT = 0.0
 
 SWARM_REPLY = (
     "Let me think about each cohort's situation...\n"

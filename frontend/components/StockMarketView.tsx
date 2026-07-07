@@ -31,11 +31,12 @@ const UP = "#16c60c";
 const DOWN = "#ff4d4f";
 const VOL_UP = "rgba(22,198,12,0.30)";
 const VOL_DOWN = "rgba(255,77,79,0.30)";
-const TARGET_CANDLES = 40;
+const TARGET_CANDLES = 30;
 // Below this many ticks we can't form multi-tick candles, so shadows (wicks)
-// won't appear yet; above it we bucket >=2 ticks per candle to get real
-// intra-candle high/low ranges.
-const MIN_TICKS_FOR_SHADOWS = 12;
+// won't appear yet; above it we bucket >=2 ticks per candle so each candle's
+// high/low come from real intra-bucket price movement.
+const MIN_TICKS_FOR_SHADOWS = 6;
+const MIN_BUCKET = 3;
 
 interface Bucketed {
   candles: CandlestickData[];
@@ -50,7 +51,7 @@ function bucketize(points: PricePoint[]): Bucketed {
   if (clean.length === 0) return { candles: [], volumes: [] };
   const k =
     clean.length >= MIN_TICKS_FOR_SHADOWS
-      ? Math.max(2, Math.round(clean.length / TARGET_CANDLES))
+      ? Math.max(MIN_BUCKET, Math.round(clean.length / TARGET_CANDLES))
       : 1;
 
   const candles: CandlestickData[] = [];
@@ -121,6 +122,10 @@ export default function StockMarketView() {
         borderColor: "rgba(255,255,255,0.08)",
         timeVisible: false,
         secondsVisible: false,
+        // Fixed candle width so sparse data doesn't stretch into huge blocks.
+        barSpacing: 9,
+        minBarSpacing: 4,
+        rightOffset: 6,
       },
       crosshair: {
         mode: CrosshairMode.Normal,

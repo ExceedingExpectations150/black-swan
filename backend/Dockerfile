@@ -10,9 +10,15 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install the CPU-only PyTorch wheel FIRST so the requirements resolve to it
-# instead of pulling the multi-GB CUDA build.
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+# Install PyTorch FIRST so the requirements resolve against it.
+#   x86_64  -> pull the CPU-only wheel (avoids the multi-GB CUDA build).
+#   aarch64 -> the /whl/cpu index has no ARM wheels; the default PyPI torch
+#              wheel is already CPU-only on ARM (Oracle Ampere A1), so use it.
+RUN if [ "$(uname -m)" = "aarch64" ] || [ "$(uname -m)" = "arm64" ]; then \
+        pip install --no-cache-dir torch; \
+    else \
+        pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu; \
+    fi
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

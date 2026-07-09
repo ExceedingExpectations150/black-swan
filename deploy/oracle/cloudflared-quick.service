@@ -1,0 +1,17 @@
+[Unit]
+Description=Cloudflare Quick Tunnel for Black Swan API (localhost:8000)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+# Zero-config "quick" tunnel: dials out to Cloudflare and returns a public
+# https://<random>.trycloudflare.com URL with valid TLS + WebSocket support.
+# No Cloudflare account or domain required. The URL lives as long as this
+# process runs; a restart mints a new URL.
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate --url http://localhost:8000
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

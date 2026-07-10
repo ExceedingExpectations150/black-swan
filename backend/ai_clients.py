@@ -32,8 +32,8 @@ GEMINI_ENDPOINT_TEMPLATE: Final[str] = (
 # requested JSON. gemini-2.5-flash follows JSON-only instructions cleanly, so
 # it is primary; the 429 engine rotates keys and scales down to a lighter
 # flash. The "Gemma cohort" concept is preserved; only the served model differs.
-PRIMARY_MODEL: Final[str] = "gemini-2.5-flash"
-FALLBACK_MODEL: Final[str] = "gemini-2.0-flash"
+PRIMARY_MODEL: Final[str] = "gemma-4-31b-it"
+FALLBACK_MODEL: Final[str] = "gemma-4-26b-it"
 # Retry/backoff kept short: under free-tier quota the LLM cohort/PR calls
 # 429 every tick, and long backoff stalls the whole simulation. The quant
 # (TimesFM) path is local and unaffected, so a fast fail keeps ticks flowing.
@@ -106,7 +106,7 @@ class GeminiModelRouter:
                 last_status = resp.status
                 body: str = await resp.text()
 
-            if last_status == 429 and attempt < MAX_RETRIES:
+            if last_status >= 429 and attempt < MAX_RETRIES:
                 self._rotate_on_rate_limit()
                 await asyncio.sleep(BACKOFF_BASE_SECONDS * (2**attempt))
                 continue

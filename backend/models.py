@@ -223,3 +223,18 @@ class EconomySnapshot(Base):
     sectors_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     movers_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     narrative: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
+class CompanySnapshot(Base):
+    """Historical point-in-time state of a company for time travel."""
+
+    __tablename__ = "company_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tick_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    ticker: Mapped[str] = mapped_column(String(16), ForeignKey("companies.ticker"), nullable=False)
+    current_price: Mapped[float] = mapped_column(Float, nullable=False)
+    sentiment: Mapped[float] = mapped_column(Float, nullable=False)
+    volatility: Mapped[float] = mapped_column(Float, nullable=False)
+    is_bankrupt: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)

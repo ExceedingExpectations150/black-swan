@@ -42,6 +42,7 @@ from models import (
     AgentType,
     AuthorType,
     Company,
+    CompanySnapshot,
     OrderBook,
     OrderStatus,
     OrderType,
@@ -49,7 +50,7 @@ from models import (
     SocialPost,
     WorldState,
 )
-from social_agents import CompanyPRContext, CorporatePRDesk, MacroAnalyst, PostDraft
+from social_agents import CompanyPRContext, NewsPublisher, MacroAnalyst, PostDraft
 
 logger = logging.getLogger("chaosnet.tick")
 
@@ -58,9 +59,9 @@ logger = logging.getLogger("chaosnet.tick")
 # 1 PR-desk call + 1 swarm call. Flash handles all 50 cohorts in a single
 # JSON array well within the context window.
 COHORT_BATCH_SIZE: int = 50
-RETAIL_MAX_ORDER_FRACTION: float = 0.20
-INSTITUTIONAL_CASH_FRACTION_PER_TICKER: float = 0.02
-INSTITUTIONAL_INVENTORY_FRACTION: float = 0.05
+RETAIL_MAX_ORDER_FRACTION: float = 0.80
+INSTITUTIONAL_CASH_FRACTION_PER_TICKER: float = 0.05
+INSTITUTIONAL_INVENTORY_FRACTION: float = 0.15
 SOCIAL_DIGEST_POSTS: int = 8
 SENTIMENT_CARRYOVER: float = 0.7
 ANALYST_EVERY_N_TICKS: int = 5
@@ -78,10 +79,13 @@ IMBALANCE_PRESSURE: float = 0.25
 # over the CDA clearing price. Deterministic (a function of ticker + tick, not
 # random.uniform and not a random walk) — the scenario driver the PRD calls a
 # "macro shock". Set both to 0 to disable and return to pure agent trading.
-EVENT_SHOCK_VOL: float = 0.02
-EVENT_SHOCK_DRIFT: float = -0.0035
+EVENT_SHOCK_VOL: float = 0.00
+EVENT_SHOCK_DRIFT: float = 0.00
 
 SWARM_PROMPT_TEMPLATE: str = """You are a JSON API simulating {n} retail trading cohorts in a multi-stock market. You never explain; you only output JSON.
+
+CRITICAL INSTRUCTION: You MUST aggressively analyze the MACRO NEWS and SOCIAL FEED. If the news is positive for a specific ticker, cohorts should aggressively BUY that ticker with all available cash. If the news is negative for a ticker or its competitors, cohorts should aggressively SELL and dump their holdings. 
+
 
 MACRO NEWS: {headline}
 
@@ -95,8 +99,8 @@ COHORTS (index | risk tolerance 0=cautious..1=aggressive | cash | holdings):
 {cohort_block}
 
 For EACH cohort decide zero or more limit orders consistent with its risk
-profile, cash, and holdings. Aggressive cohorts chase momentum and rumors;
-cautious ones de-risk. A cohort may do nothing (empty orders list).
+profile, cash, and holdings. Aggressive cohorts heavily buy/sell based on the news;
+cautious ones de-risk. A cohort may do nothing (empty orders list) if the news is irrelevant to them.
 Do not think out loud. Your ENTIRE reply must be only a strict JSON array
 starting with the character [ and nothing else, exactly this shape:
 [{{"cohort": 0, "orders": [{{"ticker": "AAPL", "action": "BUY", "qty": 10, "limit_price": 232.5}}]}}]"""
@@ -194,7 +198,7 @@ class TickEngine:
         self.forecaster = forecaster
         self.matching_engine = matching_engine or MatchingEngine()
         self.session_factory = session_factory
-        self.pr_desk = CorporatePRDesk(router)
+        self.news_desk = NewsPublisher(router)
         self.analyst = MacroAnalyst(router)
 
     async def execute_simulation_tick(
@@ -222,17 +226,20 @@ class TickEngine:
             histories = self._load_price_histories(db, companies)
 
             async with aiohttp.ClientSession() as http:
-                # 3. Corporate PR agents (one batched call).
-                posts = await self._run_pr_desk(db, http, companies, active_event, tick_id)
-                events += [_event("social_post", tick_id, _post_payload(p)) for p in posts]
-
-                # 4 & 5. Behavioral swarm (batched Gemma) + quant funds
-                # (local TimesFM on a worker thread) run concurrently.
+                # 3 & 4 & 5. Run News Publisher, Behavioral swarm (Gemma), 
+                # and quant funds (TimesFM) concurrently. 
+                # The swarm will react to the previous tick's feed to decouple them.
+                news_task = self._run_news_desk(db, http, companies, active_event, tick_id)
                 swarm_task = self._run_swarm(
-                    http, companies, retail, holdings, recent_posts + posts, active_event, tick_id
+                    http, companies, retail, holdings, recent_posts, active_event, tick_id
                 )
                 quant_task = asyncio.to_thread(self._forecast_all, histories)
-                swarm_orders, forecasts = await asyncio.gather(swarm_task, quant_task)
+                
+                posts, swarm_orders, forecasts = await asyncio.gather(
+                    news_task, swarm_task, quant_task
+                )
+
+                events += [_event("social_post", tick_id, _post_payload(p)) for p in posts]
 
                 orders = swarm_orders + self._build_institutional_orders(
                     tick_id, institutional, holdings, forecasts, companies
@@ -279,6 +286,18 @@ class TickEngine:
             )
             events.append(_event("economy_update", tick_id, snapshot))
 
+            db.add_all(
+                CompanySnapshot(
+                    tick_id=tick_id,
+                    ticker=c.ticker,
+                    current_price=c.current_price,
+                    sentiment=c.sentiment,
+                    volatility=c.volatility,
+                    is_bankrupt=c.is_bankrupt,
+                )
+                for c in companies
+            )
+
             # Legacy single-asset world_states row now tracks the sim index
             # (100 = at anchor) so the original PRD tables keep filling.
             index_level = 100.0 * (
@@ -298,10 +317,10 @@ class TickEngine:
         return events
 
     # ------------------------------------------------------------------ #
-    # PR desk                                                             #
+    # News Desk                                                           #
     # ------------------------------------------------------------------ #
 
-    async def _run_pr_desk(
+    async def _run_news_desk(
         self,
         db: Session,
         http: aiohttp.ClientSession,
@@ -334,11 +353,17 @@ class TickEngine:
             )
 
         try:
-            drafts: list[PostDraft] = await self.pr_desk.generate_posts(
-                http, contexts, headline or "No major macro news."
+            drafts: list[PostDraft] = await asyncio.wait_for(
+                self.news_desk.generate_posts(
+                    http, contexts, headline or "No major macro news."
+                ),
+                timeout=60.0
             )
+        except asyncio.TimeoutError:
+            logger.warning("News desk call timed out after 60s (tick %d)", tick_id)
+            return []
         except RuntimeError as exc:
-            logger.warning("PR desk call failed (tick %d): %s", tick_id, exc)
+            logger.warning("News desk call failed (tick %d): %s", tick_id, exc)
             return []
 
         by_ticker = {c.ticker: c for c in companies}
@@ -354,10 +379,10 @@ class TickEngine:
             post = SocialPost(
                 post_id=str(uuid.uuid4()),
                 tick_id=tick_id,
-                author_type=AuthorType.COMPANY,
+                author_type=AuthorType.ANALYST,
                 author_ticker=d.ticker,
-                author_display=company.name,
-                handle="@" + re.sub(r"[^a-z0-9]", "", company.name.lower())[:15],
+                author_display="Financial News",
+                handle="@FinancialNews",
                 content=d.content,
                 sentiment=d.sentiment,
                 likes=int(150 * abs(d.sentiment)) + 25,
@@ -415,7 +440,13 @@ class TickEngine:
                 cohort_block=cohort_block,
             )
             try:
-                raw = await self.router.prompt_cohort(http, prompt)
+                raw = await asyncio.wait_for(
+                    self.router.prompt_cohort(http, prompt),
+                    timeout=60.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("swarm batch @%d timed out after 60s (tick %d)", base, tick_id)
+                return []
             except RuntimeError as exc:
                 logger.warning("swarm batch @%d failed (tick %d): %s", base, tick_id, exc)
                 return []

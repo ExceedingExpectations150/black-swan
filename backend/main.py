@@ -24,9 +24,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from database import SessionLocal, init_db, seed_initial_market_state
+from database import SessionLocal, init_db, seed_initial_market_state, Base, engine
 from economy import compute_economy_snapshot, snapshot_from_row
-from models import Company, EconomySnapshot, PriceTick, SocialPost, WorldState
+from models import Company, EconomySnapshot, PriceTick, SocialPost, WorldState, CompanySnapshot
 
 logger = logging.getLogger("chaosnet.main")
 
@@ -119,6 +119,24 @@ class SimulationController:
         self.task: asyncio.Task[None] | None = None
         self.active_event: str = ""
         self.next_tick_id: int = 1
+        self.tick_interval_seconds: float = TICK_INTERVAL_SECONDS
+        self.paused: bool = False
+        self.target_tick: int | None = None
+        self.max_ticks: int | None = None
+        self.duration_days: int | None = None
+        self.ticks_per_day: int | None = None
+
+    def get_status_payload(self) -> dict[str, Any]:
+        return {
+            "is_running": self.is_running,
+            "paused": self.paused,
+            "tick_interval_seconds": self.tick_interval_seconds,
+            "target_tick": self.target_tick,
+            "next_tick": self.next_tick_id,
+            "max_ticks": self.max_ticks,
+            "duration_days": self.duration_days,
+            "ticks_per_day": self.ticks_per_day
+        }
 
     @property
     def is_running(self) -> bool:
@@ -145,15 +163,40 @@ class SimulationController:
         )
 
     async def run_loop(self) -> None:
+        self.pausing_in_progress = False
         try:
             while True:
+                if self.paused:
+                    if self.pausing_in_progress:
+                        self.pausing_in_progress = False
+                        await self.manager.broadcast({
+                            "type": "sim_status",
+                            "tick_id": self.next_tick_id,
+                            "ts": "",
+                            "payload": self.get_status_payload()
+                        })
+                    await asyncio.sleep(0.5)
+                    continue
+
+                if self.target_tick is not None and self.next_tick_id >= self.target_tick:
+                    self.paused = True
+                    self.target_tick = None
+                    await self.manager.broadcast({
+                        "type": "sim_status",
+                        "tick_id": self.next_tick_id,
+                        "ts": "",
+                        "payload": self.get_status_payload()
+                    })
+                    await asyncio.sleep(0.5)
+                    continue
+
                 events = await self.tick_engine.execute_simulation_tick(
                     self.next_tick_id, self.active_event
                 )
                 self.next_tick_id += 1
                 for event in events:
                     await self.manager.broadcast(event)
-                await asyncio.sleep(TICK_INTERVAL_SECONDS)
+                await asyncio.sleep(self.tick_interval_seconds)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # the loop must die loudly, never silently
@@ -173,6 +216,9 @@ controller = SimulationController()
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Always wipe database on startup to ensure a fresh simulation run
+    logger.info("Wiping database for fresh run...")
+    Base.metadata.drop_all(bind=engine)
     init_db()
     created = seed_initial_market_state()
     if created:
@@ -203,6 +249,17 @@ app.add_middleware(
 class EventPayload(BaseModel):
     headline: str
 
+class StartPayload(BaseModel):
+    speed: float
+    duration_days: int
+    ticks_per_day: int
+
+class SpeedPayload(BaseModel):
+    interval: float
+
+class DurationPayload(BaseModel):
+    ticks: int
+
 
 # --------------------------------------------------------------------- #
 # Simulation controls                                                    #
@@ -210,32 +267,84 @@ class EventPayload(BaseModel):
 
 
 @app.post("/api/start")
-async def start_simulation() -> dict[str, Any]:
+async def start_simulation(payload: StartPayload | None = None) -> dict[str, Any]:
     if controller.is_running:
-        return {"status": "already_running", "next_tick": controller.next_tick_id}
+        return {"status": "already_running", "payload": controller.get_status_payload()}
+        
+    if payload:
+        controller.tick_interval_seconds = payload.speed
+        controller.duration_days = payload.duration_days
+        controller.ticks_per_day = payload.ticks_per_day
+        controller.max_ticks = payload.duration_days * payload.ticks_per_day
+        controller.target_tick = controller.next_tick_id + controller.max_ticks - 1
+        
     try:
         controller.build_engines()
     except Exception as exc:
         logger.exception("AI layer startup failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     controller.load_tick_counter()
+    controller.paused = False
     controller.task = asyncio.create_task(controller.run_loop())
+    status = controller.get_status_payload()
+    asyncio.create_task(controller.manager.broadcast({"type": "sim_status", "tick_id": controller.next_tick_id, "ts": "", "payload": status}))
     return {
         "status": "started",
-        "tick_interval_seconds": TICK_INTERVAL_SECONDS,
-        "next_tick": controller.next_tick_id,
+        "payload": status,
     }
 
 
 @app.post("/api/stop")
 async def stop_simulation() -> dict[str, Any]:
     if not controller.is_running or controller.task is None:
-        return {"status": "not_running"}
+        return {"status": "not_running", "payload": controller.get_status_payload()}
     controller.task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await controller.task
     controller.task = None
-    return {"status": "stopped", "last_tick": controller.next_tick_id - 1}
+    status = controller.get_status_payload()
+    asyncio.create_task(controller.manager.broadcast({"type": "sim_status", "tick_id": controller.next_tick_id, "ts": "", "payload": status}))
+    return {"status": "stopped", "payload": status}
+
+
+@app.post("/api/reset")
+async def reset_simulation() -> dict[str, Any]:
+    """Wipe the entire simulation database and restart from tick 1."""
+    was_running = controller.is_running
+    if was_running and controller.task is not None:
+        controller.task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await controller.task
+        controller.task = None
+
+    # Drop and recreate the entire database
+    Base.metadata.drop_all(bind=engine)
+    init_db()
+    created = seed_initial_market_state()
+    logger.info("Database reset. Seeded %d agents.", created)
+    
+    # Reset controller state
+    controller.next_tick_id = 1
+    controller.active_event = ""
+    controller.paused = False
+    controller.target_tick = None
+    controller.max_ticks = None
+    controller.duration_days = None
+    controller.ticks_per_day = None
+    controller.tick_engine = None # Rebuild to clear any cached states
+    
+    if was_running:
+        controller.build_engines()
+        controller.task = asyncio.create_task(controller.run_loop())
+
+    status = controller.get_status_payload()
+    asyncio.create_task(controller.manager.broadcast({
+        "type": "reset", 
+        "tick_id": 1, 
+        "ts": "", 
+        "payload": status
+    }))
+    return {"status": "reset", "payload": status}
 
 
 @app.post("/api/event")
@@ -243,6 +352,48 @@ async def inject_event(payload: EventPayload) -> dict[str, Any]:
     """Set the active Black Swan headline fed into every cohort prompt."""
     controller.active_event = payload.headline.strip()
     return {"status": "event_set", "headline": controller.active_event}
+
+@app.post("/api/pause")
+async def pause_simulation() -> dict[str, Any]:
+    if controller.is_running and not controller.paused:
+        controller.pausing_in_progress = True
+    controller.paused = True
+    payload = controller.get_status_payload()
+    payload["pausing_in_progress"] = getattr(controller, "pausing_in_progress", False)
+    asyncio.create_task(controller.manager.broadcast({"type": "sim_status", "tick_id": controller.next_tick_id, "ts": "", "payload": payload}))
+    return payload
+
+@app.post("/api/resume")
+async def resume_simulation() -> dict[str, Any]:
+    if not controller.is_running:
+        raise HTTPException(status_code=400, detail="Simulation not started")
+    controller.paused = False
+    payload = controller.get_status_payload()
+    asyncio.create_task(controller.manager.broadcast({"type": "sim_status", "tick_id": controller.next_tick_id, "ts": "", "payload": payload}))
+    return payload
+
+@app.post("/api/speed")
+async def set_speed(payload: SpeedPayload) -> dict[str, Any]:
+    controller.tick_interval_seconds = max(0.0, payload.interval)
+    status = controller.get_status_payload()
+    asyncio.create_task(controller.manager.broadcast({"type": "sim_status", "tick_id": controller.next_tick_id, "ts": "", "payload": status}))
+    return status
+
+@app.post("/api/duration")
+async def set_duration(payload: DurationPayload) -> dict[str, Any]:
+    if payload.ticks <= 0:
+        controller.target_tick = None
+        controller.max_ticks = None
+    else:
+        controller.target_tick = controller.next_tick_id + payload.ticks
+        controller.max_ticks = controller.next_tick_id + payload.ticks - 1
+    status = controller.get_status_payload()
+    asyncio.create_task(controller.manager.broadcast({"type": "sim_status", "tick_id": controller.next_tick_id, "ts": "", "payload": status}))
+    return status
+
+@app.get("/api/status")
+async def get_status() -> dict[str, Any]:
+    return controller.get_status_payload()
 
 
 # --------------------------------------------------------------------- #
@@ -264,6 +415,56 @@ async def get_state() -> dict[str, Any]:
         "economy": economy,
         "social": [_post_payload(p) for p in posts],
         "tick_id": latest_tick,
+    }
+
+
+@app.get("/api/history/{tick_id}")
+async def get_history(tick_id: int) -> dict[str, Any]:
+    with SessionLocal() as db:
+        companies = list(db.execute(select(Company)).scalars())
+        company_dict = {c.ticker: c for c in companies}
+        
+        snapshots = list(db.execute(
+            select(CompanySnapshot).where(CompanySnapshot.tick_id == tick_id)
+        ).scalars())
+        
+        if not snapshots:
+            raise HTTPException(status_code=404, detail=f"No snapshot for tick {tick_id}")
+            
+        merged_companies = []
+        for snap in snapshots:
+            c = company_dict.get(snap.ticker)
+            if c:
+                payload = _company_payload(c)
+                payload.update({
+                    "current_price": snap.current_price,
+                    "sentiment": snap.sentiment,
+                    "volatility": snap.volatility,
+                    "is_bankrupt": snap.is_bankrupt,
+                    "market_cap": snap.current_price * c.shares_outstanding,
+                    "change_pct": round((snap.current_price - c.anchor_price) / c.anchor_price * 100.0, 4) if c.anchor_price else 0.0,
+                })
+                merged_companies.append(payload)
+
+        row = db.execute(
+            select(EconomySnapshot).where(EconomySnapshot.tick_id == tick_id)
+        ).scalar_one_or_none()
+        economy = snapshot_from_row(row) if row else None
+
+        posts = list(
+            db.execute(
+                select(SocialPost)
+                .where(SocialPost.tick_id <= tick_id)
+                .order_by(SocialPost.tick_id.desc())
+                .limit(50)
+            ).scalars()
+        )
+
+    return {
+        "companies": merged_companies,
+        "economy": economy,
+        "social": [_post_payload(p) for p in posts],
+        "tick_id": tick_id,
     }
 
 

@@ -19,7 +19,7 @@ export type NavKey = "dashboard" | "market" | "social" | "nodes" | "analytics" |
 const NAV: { key: NavKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { key: "market", label: "Stock Market", icon: LineChart },
-  { key: "social", label: "Social Feed", icon: MessagesSquare },
+  { key: "social", label: "News Feed", icon: MessagesSquare },
   { key: "nodes", label: "Company Nodes", icon: Radar },
   { key: "analytics", label: "Analytics", icon: BarChart3 },
   { key: "alerts", label: "Alerts", icon: Bell },

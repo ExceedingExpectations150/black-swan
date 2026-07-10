@@ -116,3 +116,13 @@ export interface StateSnapshot {
 }
 
 export type ConnectionStatus = "connecting" | "open" | "closed";
+
+export interface Alert {
+  id: string;
+  tick_id: number;
+  ts: string;
+  severity: "critical" | "warning" | "info";
+  title: string;
+  message: string;
+  read: boolean;
+}

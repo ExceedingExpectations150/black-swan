@@ -5,6 +5,7 @@ import { Search } from "lucide-react";
 import { useStore, useCompanyList } from "@/lib/store";
 import { fmtPrice, fmtPct, changeClass } from "@/lib/format";
 import Sparkline from "@/components/Sparkline";
+import SimulationControls from "@/components/SimulationControls";
 
 function useUtcClock(): { time: string; date: string } {
   const [now, setNow] = useState<Date | null>(null);
@@ -106,7 +107,9 @@ export default function TopBar() {
         )}
       </div>
 
-      <div className="shrink-0 text-right leading-none">
+      <SimulationControls />
+
+      <div className="shrink-0 text-right leading-none ml-4">
         <div className="tnum text-sm text-ink">{time}</div>
         <div className="tnum mt-0.5 text-[10px] text-ink3">{date} UTC</div>
       </div>

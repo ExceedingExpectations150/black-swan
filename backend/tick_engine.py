@@ -7,14 +7,21 @@ engine each tick). Canonical per-tick sequence:
   1. tick_start
   2. macro news (headline passed in from the controller)
   3. Corporate PR agents post -> per-company sentiment nudges
-  4. behavioral swarm (batched Gemma calls) -> per-ticker orders
-  5. quant funds (TimesFM per ticker) -> per-ticker orders
+  4. behavioral crowd -> per-ticker limit orders. The always-on LocalBehavioralEngine
+     provides the guaranteed retail order flow (no API); when Gemini quota is
+     available the Gemma swarm's decisions override it per agent.
+  5. quant funds (TimesFM per ticker) -> dispersed limit orders that provide
+     real liquidity toward each forecast (dip-buying when price < forecast)
   6. CDA match per ticker -> price_ticks, settlement, bankruptcies
   7. economy analysis (+ Macro Analyst every N ticks)
   8. return the ordered WebSocket event list for broadcast
 
-Gemma quota discipline: ONE PR-desk call + ceil(50/10) swarm calls per tick,
-all through the shared 429-rotating router. TimesFM runs locally (free).
+Price discovery is 100% order-flow driven: the clearing price moves only
+because agents actually trade through the matching engine. There is NO scripted
+price path. A Black Swan event is transmitted as fear (into behavioral expected
+returns) and as a negative sentiment impulse — agents react, and the crash
+emerges from the resulting sell flow. TimesFM runs locally (free); Gemini is
+best-effort narrative + optional retail override.
 """
 
 from __future__ import annotations
@@ -22,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
+import random
 import re
 import uuid
 from datetime import datetime, timezone
@@ -33,6 +40,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ai_clients import GeminiModelRouter, TimesFMForecaster
+from behavioral_engine import LocalBehavioralEngine
 from database import SessionLocal
 from economy import compute_economy_snapshot, persist_economy_snapshot
 from matching_engine import ClearedTransaction, MatchingEngine
@@ -71,15 +79,20 @@ TIMESFM_CONTEXT: int = 512
 # Deterministic mechanics on real order flow — not a stand-in for the CDA,
 # which still sets the price whenever a trade clears.
 IMBALANCE_PRESSURE: float = 0.25
-# Event-driven macro shock. The behavioral cohorts are the intended volatility
-# source, but under exhausted LLM quota they emit nothing, leaving the market
-# inert. While a Black Swan event is active, model its market impact as a
-# deterministic per-company shock (oscillating stress + downward drift) laid
-# over the CDA clearing price. Deterministic (a function of ticker + tick, not
-# random.uniform and not a random walk) — the scenario driver the PRD calls a
-# "macro shock". Set both to 0 to disable and return to pure agent trading.
-EVENT_SHOCK_VOL: float = 0.02
-EVENT_SHOCK_DRIFT: float = -0.0035
+# Black Swan transmission. An active event is NOT applied to the price; it is
+# applied to agent DECISIONS. EVENT_FEAR_INTENSITY feeds the behavioral crowd's
+# expected-return fear term (-> sell tilt); EVENT_SENTIMENT_HIT drives a
+# per-tick negative sentiment impulse (bad news) that the crowd and the economy
+# panel both read. The crash then emerges from the resulting order flow.
+EVENT_FEAR_INTENSITY: float = 1.0
+EVENT_SENTIMENT_HIT: float = 0.03
+EVENT_SENTIMENT_DECAY: float = 0.9
+# Institutional (TimesFM) conviction ladder: the 5 quant funds disperse their
+# limit prices between the current price and the forecast, so the smart-money
+# book actually crosses the behavioral crowd instead of stacking one-sided.
+INSTITUTIONAL_CONVICTIONS: tuple[float, ...] = (0.25, 0.5, 0.75, 1.0, 1.25)
+# Ignore forecasts within this fraction of the current price (no edge, no order).
+QUANT_DEADBAND: float = 0.001
 
 SWARM_PROMPT_TEMPLATE: str = """You are a JSON API simulating {n} retail trading cohorts in a multi-stock market. You never explain; you only output JSON.
 
@@ -196,6 +209,7 @@ class TickEngine:
         self.session_factory = session_factory
         self.pr_desk = CorporatePRDesk(router)
         self.analyst = MacroAnalyst(router)
+        self.behavioral = LocalBehavioralEngine()
 
     async def execute_simulation_tick(
         self, tick_id: int, active_event: str
@@ -220,27 +234,45 @@ class TickEngine:
                 ).scalars()
             )
             histories = self._load_price_histories(db, companies)
+            event_intensity = EVENT_FEAR_INTENSITY if active_event.strip() else 0.0
 
             async with aiohttp.ClientSession() as http:
-                # 3. Corporate PR agents (one batched call).
+                # Black Swan transmission (bad news -> sentiment), applied
+                # before the PR desk so its posts blend on top.
+                if event_intensity:
+                    self._apply_event_sentiment(companies)
+
+                # 3. Corporate PR agents (one batched call) -> sentiment nudges.
                 posts = await self._run_pr_desk(db, http, companies, active_event, tick_id)
                 events += [_event("social_post", tick_id, _post_payload(p)) for p in posts]
 
-                # 4 & 5. Behavioral swarm (batched Gemma) + quant funds
-                # (local TimesFM on a worker thread) run concurrently.
+                # 4. Behavioral crowd: the local engine reads post-PR sentiment
+                #    and always produces order flow (no API).
+                rng = random.Random(tick_id * 1_000_003 + 1)
+                local_intents = self.behavioral.generate(
+                    tick_id, companies, retail, holdings, histories, event_intensity, rng
+                )
+
+                # 4 (Gemma override) & 5 (TimesFM) run concurrently: the swarm
+                # is best-effort and overrides the local crowd per agent when
+                # quota allows; TimesFM forecasts on a worker thread.
                 swarm_task = self._run_swarm(
                     http, companies, retail, holdings, recent_posts + posts, active_event, tick_id
                 )
                 quant_task = asyncio.to_thread(self._forecast_all, histories)
-                swarm_orders, forecasts = await asyncio.gather(swarm_task, quant_task)
+                gemini_intents, forecasts = await asyncio.gather(swarm_task, quant_task)
 
-                orders = swarm_orders + self._build_institutional_orders(
+                known = {c.ticker for c in companies}
+                retail_intents = {**local_intents, **gemini_intents}  # Gemma wins per agent
+                orders = self._materialize_retail(
+                    retail_intents, retail, holdings, known, tick_id
+                ) + self._build_institutional_orders(
                     tick_id, institutional, holdings, forecasts, companies
                 )
 
-                # 6. CDA per ticker (the one and only matching engine).
+                # 6. CDA per ticker (the one and only price setter).
                 price_updates = self._clear_markets(
-                    db, tick_id, companies, orders, agents, holdings, active_event
+                    db, tick_id, companies, orders, agents, holdings
                 )
                 events.append(_event("price_update", tick_id, {"prices": price_updates}))
 
@@ -380,7 +412,13 @@ class TickEngine:
         feed: list[SocialPost],
         headline: str,
         tick_id: int,
-    ) -> list[OrderBook]:
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Best-effort Gemma cohort decisions, keyed by agent_id (empty on 429).
+
+        Returns raw order intents ({"ticker","action","qty","limit_price"});
+        the shared _materialize_retail applies cash/holding caps. An empty dict
+        means the local behavioral engine's flow stands unopposed this tick.
+        """
         market_block = "\n".join(
             f"{c.ticker} | ${c.current_price:.2f} | {_change_pct(c):+.2f}% | {c.sentiment:+.2f}"
             for c in companies
@@ -391,10 +429,7 @@ class TickEngine:
             )
             or "(feed is quiet)"
         )
-        known = {c.ticker for c in companies}
-        by_ticker_price = {c.ticker: c.current_price for c in companies}
-
-        async def run_batch(batch: list[AgentState], base: int) -> list[OrderBook]:
+        async def run_batch(batch: list[AgentState], base: int) -> dict[str, list[dict[str, Any]]]:
             cohort_block = "\n".join(
                 "{i} | {r:.2f} | ${cash:,.0f} | {h}".format(
                     i=i,
@@ -418,7 +453,7 @@ class TickEngine:
                 raw = await self.router.prompt_cohort(http, prompt)
             except RuntimeError as exc:
                 logger.warning("swarm batch @%d failed (tick %d): %s", base, tick_id, exc)
-                return []
+                return {}
             decisions = parse_swarm_reply(raw, len(batch))
             if not decisions:
                 logger.warning(
@@ -427,37 +462,9 @@ class TickEngine:
                     tick_id,
                     raw,
                 )
-            built: list[OrderBook] = []
-            for idx, orders in decisions.items():
-                agent = batch[idx]
-                for o in orders:
-                    if o["ticker"] not in known:
-                        continue
-                    qty = o["qty"]
-                    if o["action"] == "BUY":
-                        affordable = int(
-                            agent.cash_balance * RETAIL_MAX_ORDER_FRACTION / o["limit_price"]
-                        )
-                        qty = min(qty, affordable)
-                        side = OrderType.BUY
-                    else:
-                        qty = min(qty, holdings[agent.agent_id].get(o["ticker"], 0))
-                        side = OrderType.SELL
-                    if qty <= 0:
-                        continue
-                    built.append(
-                        OrderBook(
-                            order_id=str(uuid.uuid4()),
-                            tick_id=tick_id,
-                            agent_id=agent.agent_id,
-                            ticker=o["ticker"],
-                            order_type=side,
-                            quantity=qty,
-                            limit_price=o["limit_price"],
-                            status=OrderStatus.PENDING,
-                        )
-                    )
-            return built
+            # Only agents the model actually decided for; absent = HOLD, which
+            # leaves that agent's local behavioral order flow in place.
+            return {batch[idx].agent_id: orders for idx, orders in decisions.items()}
 
         batches = [
             retail[i : i + COHORT_BATCH_SIZE] for i in range(0, len(retail), COHORT_BATCH_SIZE)
@@ -465,7 +472,65 @@ class TickEngine:
         results = await asyncio.gather(
             *(run_batch(b, i * COHORT_BATCH_SIZE) for i, b in enumerate(batches))
         )
-        return [order for sub in results for order in sub]
+        merged: dict[str, list[dict[str, Any]]] = {}
+        for sub in results:
+            merged.update(sub)
+        return merged
+
+    def _materialize_retail(
+        self,
+        intents_by_agent: dict[str, list[dict[str, Any]]],
+        retail: list[AgentState],
+        holdings: dict[str, dict[str, int]],
+        known: set[str],
+        tick_id: int,
+    ) -> list[OrderBook]:
+        """Turn merged retail intents into OrderBook rows under cash/holding caps.
+
+        Shared by the local behavioral engine and the Gemma swarm so both obey
+        the same affordability rules: a BUY is capped at RETAIL_MAX_ORDER_FRACTION
+        of cash, a SELL at shares actually held. Unknown/bankrupt tickers drop.
+        """
+        by_id = {a.agent_id: a for a in retail}
+        built: list[OrderBook] = []
+        for agent_id, intents in intents_by_agent.items():
+            agent = by_id.get(agent_id)
+            if agent is None:
+                continue
+            for o in intents:
+                try:
+                    ticker = str(o["ticker"]).upper()
+                    action = str(o["action"]).upper()
+                    limit_price = float(o["limit_price"])
+                    qty = int(o["qty"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if ticker not in known or limit_price <= 0 or qty <= 0:
+                    continue
+                if action == "BUY":
+                    affordable = int(agent.cash_balance * RETAIL_MAX_ORDER_FRACTION / limit_price)
+                    qty = min(qty, affordable)
+                    side = OrderType.BUY
+                elif action == "SELL":
+                    qty = min(qty, holdings.get(agent_id, {}).get(ticker, 0))
+                    side = OrderType.SELL
+                else:
+                    continue
+                if qty <= 0:
+                    continue
+                built.append(
+                    OrderBook(
+                        order_id=str(uuid.uuid4()),
+                        tick_id=tick_id,
+                        agent_id=agent_id,
+                        ticker=ticker,
+                        order_type=side,
+                        quantity=qty,
+                        limit_price=limit_price,
+                        status=OrderStatus.PENDING,
+                    )
+                )
+        return built
 
     # ------------------------------------------------------------------ #
     # Quant funds                                                         #
@@ -485,23 +550,41 @@ class TickEngine:
         forecasts: dict[str, float],
         companies: list[Company],
     ) -> list[OrderBook]:
+        """TimesFM quant funds as dispersed liquidity providers.
+
+        Each of the 5 funds treats its forecast as fair value and posts a limit
+        order PARTWAY there (scaled by its conviction on the ladder), so the
+        smart-money book spans the current-price -> forecast range and actually
+        crosses the behavioral crowd instead of stacking one-sided. When panic
+        drops the price below the (history-based) forecast the funds BUY the
+        dip; when it runs above, they SELL — real, model-driven price discovery.
+        """
         orders: list[OrderBook] = []
         by_ticker = {c.ticker: c for c in companies}
-        for agent in institutional:
+        for i, agent in enumerate(institutional):
+            conviction = INSTITUTIONAL_CONVICTIONS[i % len(INSTITUTIONAL_CONVICTIONS)]
             for ticker, prediction in forecasts.items():
                 company = by_ticker.get(ticker)
-                if company is None:
+                if company is None or company.current_price <= 0:
                     continue
-                if prediction > company.current_price:
-                    qty = int(
-                        agent.cash_balance * INSTITUTIONAL_CASH_FRACTION_PER_TICKER / prediction
-                    )
+                gap = (prediction - company.current_price) / company.current_price
+                if abs(gap) < QUANT_DEADBAND:
+                    continue
+                limit_price = round(
+                    max(0.01, company.current_price * (1.0 + gap * conviction)), 2
+                )
+                if gap > 0:
                     side = OrderType.BUY
-                else:
                     qty = int(
-                        holdings[agent.agent_id].get(ticker, 0) * INSTITUTIONAL_INVENTORY_FRACTION
+                        agent.cash_balance
+                        * INSTITUTIONAL_CASH_FRACTION_PER_TICKER
+                        * conviction
+                        / limit_price
                     )
+                else:
                     side = OrderType.SELL
+                    held = holdings.get(agent.agent_id, {}).get(ticker, 0)
+                    qty = int(held * INSTITUTIONAL_INVENTORY_FRACTION * (0.5 + conviction))
                 if qty <= 0:
                     continue
                 orders.append(
@@ -512,7 +595,7 @@ class TickEngine:
                         ticker=ticker,
                         order_type=side,
                         quantity=qty,
-                        limit_price=float(prediction),
+                        limit_price=limit_price,
                         status=OrderStatus.PENDING,
                     )
                 )
@@ -530,10 +613,8 @@ class TickEngine:
         orders: list[OrderBook],
         agents: list[AgentState],
         holdings: dict[str, dict[str, int]],
-        active_event: str,
     ) -> list[dict[str, Any]]:
         by_agent = {a.agent_id: a for a in agents}
-        shock_on = bool(active_event.strip())
         price_updates: list[dict[str, Any]] = []
 
         for company in companies:
@@ -549,12 +630,8 @@ class TickEngine:
                 if o.status == OrderStatus.PENDING:
                     o.status = OrderStatus.CANCELLED
 
-            # Macro-shock overlay (see EVENT_SHOCK_* ) — the active Black Swan
-            # event's impact on the clearing price.
-            if shock_on:
-                clearing_price = max(
-                    0.01, clearing_price * (1.0 + self._event_shock(company.ticker, tick_id))
-                )
+            # The clearing price IS the price. No overlay, no scripted path —
+            # it moved only because these orders actually traded.
             company.current_price = clearing_price
             db.add(
                 PriceTick(
@@ -578,24 +655,20 @@ class TickEngine:
         return price_updates
 
     @staticmethod
-    def _event_shock(ticker: str, tick_id: int) -> float:
-        """Per-company macro-shock multiplier delta for the active event.
+    def _apply_event_sentiment(companies: list[Company]) -> None:
+        """Transmit an active Black Swan as a negative sentiment impulse.
 
-        Deterministic: an oscillating stress wave (phase seeded from the
-        ticker) plus a downward drift. Companies diverge, prices swing up and
-        down between ticks (real candle bodies + wicks once bucketed), and the
-        drift bends the whole market into a Black-Swan decline.
+        This does NOT move price — it moves crowd sentiment (bad news), which
+        the behavioral engine then trades on. The hit is heterogeneous per
+        company (seeded from the ticker) so sectors diverge, and it decays each
+        tick toward the impulse floor rather than snapping to it.
         """
-        phase = (sum(ord(ch) for ch in ticker) % 100) / 100.0 * 2.0 * math.pi
-        # Slow swing (the overall stress wave) plus a faster wiggle so prices
-        # reverse within a candle bucket, producing real wicks/shadows once
-        # ticks are aggregated. Downward drift bends it into a decline.
-        slow = math.sin(tick_id * 0.4 + phase) * EVENT_SHOCK_VOL
-        # ~2.3-tick period, dominant amplitude, so consecutive ticks zigzag
-        # up/down: any 3-tick candle bucket straddles a local extreme, giving
-        # a clearly visible wick/shadow beyond the body.
-        fast = math.sin(tick_id * 2.7 + phase * 2.0) * EVENT_SHOCK_VOL * 1.3
-        return slow + fast + EVENT_SHOCK_DRIFT
+        for company in companies:
+            bias = (sum(ord(ch) for ch in company.ticker) % 100) / 100.0  # 0..1
+            impulse = -EVENT_SENTIMENT_HIT * (0.5 + bias)
+            company.sentiment = max(
+                -1.0, min(1.0, company.sentiment * EVENT_SENTIMENT_DECAY + impulse)
+            )
 
     @staticmethod
     def _one_sided_pressure(book: list[OrderBook], baseline: float) -> float:

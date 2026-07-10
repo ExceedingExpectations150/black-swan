@@ -35,8 +35,9 @@ class MatchingEngine:
         BUY orders are sorted by limit price descending, SELL orders
         ascending. While the best buy limit >= best sell limit, the pair
         trades min(remaining quantities) at the midpoint of the two limits.
-        The clearing price is the average of the matched pair prices; with
-        no matches it stays at `baseline_price`.
+        The clearing price is the VOLUME-WEIGHTED average of the matched
+        pair prices, so a large fill moves the print more than a 1-share
+        fill; with no matches it stays at `baseline_price`.
 
         Returns (clearing_price, cleared_transactions, total_volume).
         """
@@ -84,8 +85,10 @@ class MatchingEngine:
                 sell_idx += 1
 
         total_volume: int = sum(t.quantity for t in transactions)
-        if transactions:
-            clearing_price: float = sum(t.price for t in transactions) / len(transactions)
+        if total_volume > 0:
+            clearing_price: float = (
+                sum(t.price * t.quantity for t in transactions) / total_volume
+            )
         else:
             clearing_price = baseline_price
 

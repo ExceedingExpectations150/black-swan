@@ -5,10 +5,11 @@ import dynamic from "next/dynamic";
 import { useLiveConnection } from "@/lib/socket";
 import { useStore, useCompanyList } from "@/lib/store";
 import TopBar from "@/components/TopBar";
+import TimeBar from "@/components/TimeBar";
 import Sidebar, { type NavKey } from "@/components/Sidebar";
 import MarketOverview from "@/components/MarketOverview";
 import TopMovers from "@/components/TopMovers";
-import SocialFeed from "@/components/SocialFeed";
+import AnalystPanel from "@/components/AnalystPanel";
 import EconomyPanel from "@/components/EconomyPanel";
 import CompanyDetail from "@/components/CompanyDetail";
 import StockMarketView from "@/components/StockMarketView";
@@ -37,6 +38,7 @@ export default function Home() {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-black">
       <TopBar />
+      <TimeBar />
       <div className="flex min-h-0 flex-1">
         <Sidebar active={nav} onNavigate={setNav} />
         <main className="flex min-w-0 flex-1 flex-col gap-3 p-3">
@@ -67,10 +69,10 @@ function MainContent({ nav }: { nav: NavKey }) {
     );
   }
 
-  if (nav === "social") {
+  if (nav === "analyst") {
     return (
       <div className="min-h-0 flex-1">
-        <SocialFeed />
+        <AnalystPanel />
       </div>
     );
   }
@@ -111,7 +113,7 @@ function MainContent({ nav }: { nav: NavKey }) {
         <div className="grid h-[240px] shrink-0 grid-cols-3 gap-3">
           <MarketOverview />
           <TopMovers />
-          <SocialFeed />
+          <AnalystPanel />
         </div>
       )}
     </>

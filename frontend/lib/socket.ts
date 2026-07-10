@@ -6,12 +6,12 @@
 
 import { useEffect } from "react";
 import { useStore } from "./store";
+import type { SimClock } from "./store";
 import type {
   CompanyUpdatePayload,
   Envelope,
   MarketIndex,
   PriceUpdatePayload,
-  SocialPostT,
   StateSnapshot,
 } from "./types";
 
@@ -25,7 +25,7 @@ function dispatch(env: Envelope): void {
   const s = useStore.getState();
   switch (env.type) {
     case "tick_start":
-      s.setTick(env.tick_id);
+      s.setClock(env.payload as SimClock);
       break;
     case "news":
       s.setNews((env.payload as { headline: string }).headline);
@@ -35,9 +35,6 @@ function dispatch(env: Envelope): void {
       break;
     case "company_update":
       s.applyCompanyUpdate((env.payload as CompanyUpdatePayload).companies);
-      break;
-    case "social_post":
-      s.addSocialPost(env.payload as SocialPostT);
       break;
     case "economy_update":
       s.setEconomy(env.payload as never);

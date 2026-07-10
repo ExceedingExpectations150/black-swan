@@ -21,6 +21,13 @@ import type {
 const PRICE_SERIES_CAP = 512;
 const SOCIAL_CAP = 100;
 
+export interface SimClock {
+  tick_id: number;
+  sim_time: string;
+  sim_label: string;
+  session_pct: number;
+}
+
 interface StoreState {
   companies: Record<string, Company>;
   priceSeries: Record<string, PricePoint[]>;
@@ -30,6 +37,7 @@ interface StoreState {
   indices: MarketIndex[];
   news: string;
   tickId: number;
+  clock: SimClock | null;
   connectionStatus: ConnectionStatus;
   selectedTicker: string | null;
   watchlist: string[];
@@ -38,6 +46,7 @@ interface StoreState {
   // actions
   hydrate: (snapshot: StateSnapshot) => void;
   setConnection: (status: ConnectionStatus) => void;
+  setClock: (clock: SimClock) => void;
   setIndices: (indices: MarketIndex[]) => void;
   setSelectedTicker: (ticker: string | null) => void;
   toggleWatch: (ticker: string) => void;
@@ -70,6 +79,7 @@ export const useStore = create<StoreState>((set) => ({
   indices: [],
   news: "",
   tickId: 0,
+  clock: null,
   connectionStatus: "connecting",
   selectedTicker: null,
   watchlist: ["AAPL", "NVDA", "TSLA", "JPM", "2222.SR"],
@@ -86,11 +96,13 @@ export const useStore = create<StoreState>((set) => ({
         economy: snapshot.economy ?? null,
         news: "",
         tickId: snapshot.tick_id,
+        clock: (snapshot as unknown as { clock?: SimClock }).clock ?? null,
         hydrated: true,
       };
     }),
 
   setConnection: (connectionStatus) => set({ connectionStatus }),
+  setClock: (clock) => set({ clock, tickId: clock.tick_id }),
   setIndices: (indices) => set({ indices }),
   setSelectedTicker: (selectedTicker) => set({ selectedTicker }),
 

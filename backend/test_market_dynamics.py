@@ -41,6 +41,9 @@ class _StubForecaster:
         window = price_history[-FORECAST_WINDOW:]
         return float(statistics.mean(window)) if window else ANCHOR
 
+    def forecast_batch(self, histories: dict[str, list[float]]) -> dict[str, float]:
+        return {t: self.forecast_next_tick(s) for t, s in histories.items()}
+
 
 class _DummyRouter:
     pass

@@ -27,10 +27,14 @@ from sqlalchemy import func, select
 from database import SessionLocal, init_db, seed_initial_market_state
 from economy import compute_economy_snapshot, snapshot_from_row
 from models import Company, EconomySnapshot, PriceTick, SocialPost, WorldState
+from sim_time import sim_clock
 
 logger = logging.getLogger("chaosnet.main")
 
 TICK_INTERVAL_SECONDS: float = 3.0
+# How often the background thread recomputes the whole-market TimesFM forecast.
+# Decoupled from the tick so the ~10 s CPU inference never stalls real-time play.
+FORECAST_REFRESH_SECONDS: float = 8.0
 
 
 def _company_payload(company: Company) -> dict[str, Any]:
@@ -117,6 +121,7 @@ class SimulationController:
         self.manager = ConnectionManager()
         self.tick_engine: Any = None
         self.task: asyncio.Task[None] | None = None
+        self.forecast_task: asyncio.Task[None] | None = None
         self.active_event: str = ""
         self.next_tick_id: int = 1
 
@@ -167,6 +172,28 @@ class SimulationController:
                 }
             )
 
+    async def forecast_refresh_loop(self) -> None:
+        """Refresh the TimesFM forecast cache off the event loop, forever.
+
+        The heavy inference runs in a worker thread so it never blocks the tick
+        loop. Errors are logged and retried on the next cycle — a bad forecast
+        refresh must not take down real-time play (the market keeps trading on
+        the local crowd and the last good forecast).
+        """
+        try:
+            while True:
+                try:
+                    # 1. Analyst agent maps the active event -> per-ticker impact
+                    #    (only re-runs when the event changes). 2. TimesFM
+                    #    forecast, conditioned on that impact, off-thread.
+                    await self.tick_engine.refresh_event_impact(self.active_event)
+                    await asyncio.to_thread(self.tick_engine.refresh_forecasts)
+                except Exception:
+                    logger.exception("forecast/impact refresh failed")
+                await asyncio.sleep(FORECAST_REFRESH_SECONDS)
+        except asyncio.CancelledError:
+            raise
+
 
 controller = SimulationController()
 
@@ -181,6 +208,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
     if controller.is_running and controller.task is not None:
         controller.task.cancel()
+    if controller.forecast_task is not None:
+        controller.forecast_task.cancel()
 
 
 app = FastAPI(title="ChaosNet: Black Swan Market Twin", lifespan=lifespan)
@@ -219,6 +248,9 @@ async def start_simulation() -> dict[str, Any]:
         logger.exception("AI layer startup failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     controller.load_tick_counter()
+    # Background TimesFM refresher first so a forecast starts warming immediately,
+    # then the real-time tick loop (which reads the forecast cache).
+    controller.forecast_task = asyncio.create_task(controller.forecast_refresh_loop())
     controller.task = asyncio.create_task(controller.run_loop())
     return {
         "status": "started",
@@ -235,14 +267,52 @@ async def stop_simulation() -> dict[str, Any]:
     with contextlib.suppress(asyncio.CancelledError):
         await controller.task
     controller.task = None
+    if controller.forecast_task is not None:
+        controller.forecast_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await controller.forecast_task
+        controller.forecast_task = None
     return {"status": "stopped", "last_tick": controller.next_tick_id - 1}
 
 
 @app.post("/api/event")
 async def inject_event(payload: EventPayload) -> dict[str, Any]:
-    """Set the active Black Swan headline fed into every cohort prompt."""
+    """Set the active Black Swan headline the analyst agent reasons about."""
     controller.active_event = payload.headline.strip()
     return {"status": "event_set", "headline": controller.active_event}
+
+
+@app.post("/api/reset")
+async def reset_simulation() -> dict[str, Any]:
+    """Stop the sim and reseed a pristine world (fresh cash + holdings)."""
+    for task_attr in ("task", "forecast_task"):
+        task = getattr(controller, task_attr)
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            setattr(controller, task_attr, None)
+    from database import reset_world
+
+    created = await asyncio.to_thread(reset_world)
+    controller.active_event = ""
+    if controller.tick_engine is not None:
+        controller.tick_engine.reset_ai_state()
+    controller.load_tick_counter()
+    return {"status": "reset", "agents": created, "next_tick": controller.next_tick_id}
+
+
+@app.get("/api/analyst")
+async def get_analyst() -> dict[str, Any]:
+    """Current event-impact analysis feeding the TimesFM forecast."""
+    engine = controller.tick_engine
+    if engine is None:
+        return {"event": controller.active_event, "source": "", "impact": {}}
+    return {
+        "event": controller.active_event,
+        "source": engine.event_impact_source,
+        "impact": engine.event_impact,
+    }
 
 
 # --------------------------------------------------------------------- #
@@ -264,6 +334,7 @@ async def get_state() -> dict[str, Any]:
         "economy": economy,
         "social": [_post_payload(p) for p in posts],
         "tick_id": latest_tick,
+        "clock": sim_clock(latest_tick),
     }
 
 

@@ -10,7 +10,7 @@ import os
 import random
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, delete, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -158,6 +158,47 @@ def seed_initial_market_state() -> int:
 
         db.commit()
         return len(agents)
+
+
+def reset_world() -> int:
+    """Wipe all dynamic state and reseed a pristine market (keeps real anchors).
+
+    Deletes orders/prices/economy/world/holdings/agents and resets every
+    company back to its real anchor price, then reseeds the agent roster with
+    full cash and starting holdings. Companies (and their real anchor prices)
+    are preserved, so no market-data fetch is needed. Returns agents created.
+    """
+    from models import (
+        AgentHolding,
+        Company,
+        EconomySnapshot,
+        OrderBook,
+        PriceTick,
+        SocialPost,
+        WorldState,
+    )
+
+    with SessionLocal() as db:
+        for model in (
+            OrderBook,
+            PriceTick,
+            SocialPost,
+            EconomySnapshot,
+            WorldState,
+            AgentHolding,
+            AgentState,
+        ):
+            db.execute(delete(model))
+        db.execute(
+            update(Company).values(
+                current_price=Company.anchor_price,
+                sentiment=0.0,
+                volatility=0.0,
+                is_bankrupt=False,
+            )
+        )
+        db.commit()
+    return seed_initial_market_state()
 
 
 if __name__ == "__main__":

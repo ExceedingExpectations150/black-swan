@@ -42,6 +42,8 @@ from sqlalchemy.orm import Session
 from ai_clients import GeminiModelRouter, TimesFMForecaster
 from behavioral_engine import LocalBehavioralEngine
 from database import SessionLocal
+from event_analyst import EventImpactAnalyst
+from sim_time import sim_clock
 from economy import compute_economy_snapshot, persist_economy_snapshot
 from matching_engine import ClearedTransaction, MatchingEngine
 from models import (
@@ -210,12 +212,31 @@ class TickEngine:
         self.pr_desk = CorporatePRDesk(router)
         self.analyst = MacroAnalyst(router)
         self.behavioral = LocalBehavioralEngine()
+        self.event_analyst = EventImpactAnalyst(router)
+        # Latest event-conditioned TimesFM forecasts, refreshed off-thread by the
+        # controller so the ~10 s CPU inference never blocks the real-time tick
+        # loop. Reassigned atomically; the tick reads a snapshot. Empty until the
+        # first refresh.
+        self.forecast_cache: dict[str, float] = {}
+        # Per-ticker event impact fraction from the analyst agent (see
+        # refresh_event_impact); applied to the raw TimesFM forecast so the
+        # quant funds trade a prediction that accounts for the Black Swan.
+        self.event_impact: dict[str, float] = {}
+        self.event_impact_source: str = ""
+        self._analyzed_event: str = ""
 
     async def execute_simulation_tick(
         self, tick_id: int, active_event: str
     ) -> list[dict[str, Any]]:
-        """Run one tick; returns the ordered event list for /ws broadcast."""
-        events: list[dict[str, Any]] = [_event("tick_start", tick_id, {"tick_id": tick_id})]
+        """Run one tick; returns the ordered event list for /ws broadcast.
+
+        Real-time by construction: only fast, local work runs here (behavioral
+        crowd, cached TimesFM forecast, CDA, local event-aware social). The
+        ~10 s TimesFM inference runs off-thread and lands in self.forecast_cache;
+        this tick just reads a snapshot of it. No blocking network calls.
+        """
+        clock = sim_clock(tick_id)
+        events: list[dict[str, Any]] = [_event("tick_start", tick_id, clock)]
         events.append(_event("news", tick_id, {"headline": active_event}))
 
         with self.session_factory() as db:
@@ -228,68 +249,36 @@ class TickEngine:
             retail = [a for a in agents if a.agent_type == AgentType.GEMMA_RETAIL_COHORT]
             institutional = [a for a in agents if a.agent_type == AgentType.TIMESFM_INSTITUTIONAL]
             holdings = self._load_holdings(db, agents)
-            recent_posts: list[SocialPost] = list(
-                db.execute(
-                    select(SocialPost).order_by(SocialPost.tick_id.desc()).limit(SOCIAL_DIGEST_POSTS)
-                ).scalars()
-            )
             histories = self._load_price_histories(db, companies)
             event_intensity = EVENT_FEAR_INTENSITY if active_event.strip() else 0.0
+            rng = random.Random(tick_id * 1_000_003 + 1)
 
-            async with aiohttp.ClientSession() as http:
-                # Black Swan transmission (bad news -> sentiment), applied
-                # before the PR desk so its posts blend on top.
-                if event_intensity:
-                    self._apply_event_sentiment(companies)
+            # Black Swan transmission: bad news -> crowd sentiment (agents then
+            # trade on it). Not applied to price.
+            if event_intensity:
+                self._apply_event_sentiment(companies)
 
-                # 3. Corporate PR agents (one batched call) -> sentiment nudges.
-                posts = await self._run_pr_desk(db, http, companies, active_event, tick_id)
-                events += [_event("social_post", tick_id, _post_payload(p)) for p in posts]
+            # Retail crowd (local, always-on) + quant funds from the latest
+            # background TimesFM forecast snapshot.
+            local_intents = self.behavioral.generate(
+                tick_id, companies, retail, holdings, histories, event_intensity, rng
+            )
+            known = {c.ticker for c in companies}
+            forecasts = dict(self.forecast_cache)  # snapshot; empty before first refresh
+            orders = self._materialize_retail(
+                local_intents, retail, holdings, known, tick_id
+            ) + self._build_institutional_orders(
+                tick_id, institutional, holdings, forecasts, companies
+            )
 
-                # 4. Behavioral crowd: the local engine reads post-PR sentiment
-                #    and always produces order flow (no API).
-                rng = random.Random(tick_id * 1_000_003 + 1)
-                local_intents = self.behavioral.generate(
-                    tick_id, companies, retail, holdings, histories, event_intensity, rng
-                )
+            # CDA per ticker (the one and only price setter).
+            price_updates = self._clear_markets(
+                db, tick_id, companies, orders, agents, holdings
+            )
+            events.append(_event("price_update", tick_id, {"prices": price_updates}))
 
-                # 4 (Gemma override) & 5 (TimesFM) run concurrently: the swarm
-                # is best-effort and overrides the local crowd per agent when
-                # quota allows; TimesFM forecasts on a worker thread.
-                swarm_task = self._run_swarm(
-                    http, companies, retail, holdings, recent_posts + posts, active_event, tick_id
-                )
-                quant_task = asyncio.to_thread(self._forecast_all, histories)
-                gemini_intents, forecasts = await asyncio.gather(swarm_task, quant_task)
-
-                known = {c.ticker for c in companies}
-                retail_intents = {**local_intents, **gemini_intents}  # Gemma wins per agent
-                orders = self._materialize_retail(
-                    retail_intents, retail, holdings, known, tick_id
-                ) + self._build_institutional_orders(
-                    tick_id, institutional, holdings, forecasts, companies
-                )
-
-                # 6. CDA per ticker (the one and only price setter).
-                price_updates = self._clear_markets(
-                    db, tick_id, companies, orders, agents, holdings
-                )
-                events.append(_event("price_update", tick_id, {"prices": price_updates}))
-
-                # 7. Economy analysis (+ periodic macro analyst). The analyst
-                # is best-effort like the PR desk / swarm: a rate-limit or API
-                # error must not crash the whole simulation loop.
-                snapshot = compute_economy_snapshot(db, tick_id)
-                if tick_id % ANALYST_EVERY_N_TICKS == 0:
-                    digest = self._economy_digest(snapshot)
-                    try:
-                        narrative = await self.analyst.narrate(http, digest)
-                    except RuntimeError as exc:
-                        logger.warning("macro analyst failed (tick %d): %s", tick_id, exc)
-                        narrative = ""
-                    if narrative:
-                        snapshot["narrative"] = narrative
-                persist_economy_snapshot(db, snapshot)
+            snapshot = compute_economy_snapshot(db, tick_id)
+            persist_economy_snapshot(db, snapshot)
 
             events.append(
                 _event(
@@ -326,8 +315,69 @@ class TickEngine:
             )
             db.commit()
 
-        events.append(_event("tick_end", tick_id, {"tick_id": tick_id}))
+        events.append(_event("tick_end", tick_id, clock))
         return events
+
+    def refresh_forecasts(self) -> None:
+        """Recompute the event-conditioned forecast (read-only, off-thread).
+
+        Called by the controller in a worker thread every few seconds. Runs one
+        batched TimesFM forecast, then conditions each ticker on the analyst's
+        event impact — final = TimesFM x (1 + impact) — so the quant funds trade
+        a prediction that accounts for the Black Swan. Never writes the DB, so
+        it can't contend with the tick loop's single-writer session.
+        """
+        with self.session_factory() as db:
+            companies = list(
+                db.execute(select(Company).where(Company.is_bankrupt.is_(False))).scalars()
+            )
+            histories = self._load_price_histories(db, companies)
+        raw = self.forecaster.forecast_batch(histories)
+        impact = self.event_impact
+        self.forecast_cache = {
+            ticker: value * (1.0 + impact.get(ticker, 0.0)) for ticker, value in raw.items()
+        }
+
+    def reset_ai_state(self) -> None:
+        """Clear cached forecasts and event analysis (used on world reset)."""
+        self.forecast_cache = {}
+        self.event_impact = {}
+        self.event_impact_source = ""
+        self._analyzed_event = ""
+
+    async def refresh_event_impact(self, active_event: str) -> None:
+        """Update the per-ticker event impact when the active event changes.
+
+        Runs the LLM analyst agent (with a keyword fallback) once per distinct
+        event, mapping its per-sector verdict onto every company. Best-effort:
+        a failure leaves the last impact in place. Clearing the event clears
+        the impact, so the quant forecast reverts to pure TimesFM (recovery).
+        """
+        event = active_event.strip()
+        if event == self._analyzed_event:
+            return
+        if not event:
+            self.event_impact = {}
+            self.event_impact_source = ""
+            self._analyzed_event = ""
+            return
+        with self.session_factory() as db:
+            companies = list(db.execute(select(Company)).scalars())
+        sectors = sorted({c.sector for c in companies})
+        try:
+            async with aiohttp.ClientSession() as http:
+                sector_impact, source = await self.event_analyst.analyze(http, event, sectors)
+        except Exception as exc:  # never let analysis crash the refresh loop
+            logger.warning("event analyst failed for %r: %s", event, exc)
+            return
+        self.event_impact = {
+            c.ticker: sector_impact.get(c.sector, 0.0) for c in companies
+        }
+        self.event_impact_source = source
+        self._analyzed_event = event
+        logger.info(
+            "event impact (%s) for %r across %d sectors", source, event, len(sector_impact)
+        )
 
     # ------------------------------------------------------------------ #
     # PR desk                                                             #
@@ -537,10 +587,9 @@ class TickEngine:
     # ------------------------------------------------------------------ #
 
     def _forecast_all(self, histories: dict[str, list[float]]) -> dict[str, float]:
-        forecasts: dict[str, float] = {}
-        for ticker, series in histories.items():
-            forecasts[ticker] = self.forecaster.forecast_next_tick(series)
-        return forecasts
+        # One batched TimesFM call for the whole market (see forecast_batch);
+        # per-ticker looping was ~30 s/tick on CPU.
+        return self.forecaster.forecast_batch(histories)
 
     def _build_institutional_orders(
         self,

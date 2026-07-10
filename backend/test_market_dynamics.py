@@ -120,14 +120,14 @@ def main() -> int:
 
     index_at: dict[int, float] = {0: _index(companies)}
     ticks_with_trades = 0
-    from tick_engine import EVENT_FEAR_INTENSITY
 
     print(f"{'tick':>4} {'phase':<8} {'index':>8} {'volume':>8}")
     for tick in range(1, TOTAL_TICKS + 1):
         event_active = CALM_UNTIL < tick <= EVENT_UNTIL
-        event_intensity = EVENT_FEAR_INTENSITY if event_active else 0.0
-        if event_intensity:
-            engine._apply_event_sentiment(companies)
+        event_str = "market shock" if event_active else ""
+        event_intensity = engine._event_intensity(event_str, tick)
+        if event_intensity > 0:
+            engine._apply_event_sentiment(companies, event_intensity)
 
         rng = random.Random(tick * 1_000_003 + 1)
         local_intents = engine.behavioral.generate(

@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import random
 import re
 import uuid
@@ -89,12 +90,24 @@ IMBALANCE_PRESSURE: float = 0.25
 EVENT_FEAR_INTENSITY: float = 1.0
 EVENT_SENTIMENT_HIT: float = 0.03
 EVENT_SENTIMENT_DECAY: float = 0.9
+# A Black Swan's panic is an IMPULSE that fades, not a permanent force. Without
+# decay the crowd sells every tick forever and the market spirals to ~zero (the
+# "-99%" bug). Fear decays from the full hit toward a small residual over
+# EVENT_DECAY_TICKS, so the market drops sharply, finds a floor near the
+# impaired fundamental, and can recover — while the (persistent) analyst impact
+# on the forecast keeps fundamentals repriced.
+EVENT_DECAY_TICKS: float = 12.0
+EVENT_RESIDUAL_FRAC: float = 0.15
 # Institutional (TimesFM) conviction ladder: the 5 quant funds disperse their
 # limit prices between the current price and the forecast, so the smart-money
 # book actually crosses the behavioral crowd instead of stacking one-sided.
 INSTITUTIONAL_CONVICTIONS: tuple[float, ...] = (0.25, 0.5, 0.75, 1.0, 1.25)
 # Ignore forecasts within this fraction of the current price (no edge, no order).
 QUANT_DEADBAND: float = 0.001
+# Weight of the event-repriced fundamental (anchor x (1 + impact)) in the quant
+# forecast. High enough that the quant funds DEFEND that fundamental as a floor
+# instead of chasing a falling price down forever (the perpetual-ratchet bug).
+FUNDAMENTAL_BLEND: float = 0.6
 
 SWARM_PROMPT_TEMPLATE: str = """You are a JSON API simulating {n} retail trading cohorts in a multi-stock market. You never explain; you only output JSON.
 
@@ -224,6 +237,9 @@ class TickEngine:
         self.event_impact: dict[str, float] = {}
         self.event_impact_source: str = ""
         self._analyzed_event: str = ""
+        # Tracks how long the current event has been active, to decay its panic.
+        self._event_key: str = ""
+        self._event_start_tick: int | None = None
 
     async def execute_simulation_tick(
         self, tick_id: int, active_event: str
@@ -250,13 +266,13 @@ class TickEngine:
             institutional = [a for a in agents if a.agent_type == AgentType.TIMESFM_INSTITUTIONAL]
             holdings = self._load_holdings(db, agents)
             histories = self._load_price_histories(db, companies)
-            event_intensity = EVENT_FEAR_INTENSITY if active_event.strip() else 0.0
+            event_intensity = self._event_intensity(active_event, tick_id)
             rng = random.Random(tick_id * 1_000_003 + 1)
 
             # Black Swan transmission: bad news -> crowd sentiment (agents then
-            # trade on it). Not applied to price.
-            if event_intensity:
-                self._apply_event_sentiment(companies)
+            # trade on it), scaled by the decaying panic. Not applied to price.
+            if event_intensity > 0:
+                self._apply_event_sentiment(companies, event_intensity)
 
             # Retail crowd (local, always-on) + quant funds from the latest
             # background TimesFM forecast snapshot.
@@ -333,10 +349,32 @@ class TickEngine:
             )
             histories = self._load_price_histories(db, companies)
         raw = self.forecaster.forecast_batch(histories)
-        impact = self.event_impact
-        self.forecast_cache = {
-            ticker: value * (1.0 + impact.get(ticker, 0.0)) for ticker, value in raw.items()
-        }
+        anchors = {c.ticker: c.anchor_price for c in companies}
+        self.forecast_cache = self._condition_forecast(raw, anchors, self.event_impact)
+
+    @staticmethod
+    def _condition_forecast(
+        raw: dict[str, float], anchors: dict[str, float], impact: dict[str, float]
+    ) -> dict[str, float]:
+        """Blend the trailing TimesFM forecast with the event-repriced fundamental.
+
+        For a name the analyst flagged, fair value is anchor x (1 + impact) — a
+        FIXED repriced level the quant funds trade toward. Blending it in (rather
+        than haircutting the trailing forecast, which just chases a falling price
+        down) gives the market a floor at the justified fundamental instead of a
+        bottomless slide to zero.
+        """
+        conditioned: dict[str, float] = {}
+        for ticker, raw_val in raw.items():
+            imp = impact.get(ticker, 0.0)
+            if imp and ticker in anchors:
+                fundamental = anchors[ticker] * (1.0 + imp)
+                conditioned[ticker] = (
+                    FUNDAMENTAL_BLEND * fundamental + (1.0 - FUNDAMENTAL_BLEND) * raw_val
+                )
+            else:
+                conditioned[ticker] = raw_val
+        return conditioned
 
     def reset_ai_state(self) -> None:
         """Clear cached forecasts and event analysis (used on world reset)."""
@@ -703,18 +741,40 @@ class TickEngine:
                 agent.is_bankrupt = True
         return price_updates
 
+    def _event_intensity(self, active_event: str, tick_id: int) -> float:
+        """Decaying panic intensity for the active event (0.0 when none).
+
+        Peaks at EVENT_FEAR_INTENSITY when the event first hits, then decays
+        toward a small residual over EVENT_DECAY_TICKS. This is what makes the
+        crash an impulse that stabilizes instead of a permanent slide to zero.
+        """
+        event = active_event.strip()
+        if not event:
+            self._event_key = ""
+            self._event_start_tick = None
+            return 0.0
+        if event != self._event_key:
+            self._event_key = event
+            self._event_start_tick = tick_id
+        start = self._event_start_tick if self._event_start_tick is not None else tick_id
+        elapsed = max(0, tick_id - start)
+        decay = EVENT_RESIDUAL_FRAC + (1.0 - EVENT_RESIDUAL_FRAC) * math.exp(
+            -elapsed / EVENT_DECAY_TICKS
+        )
+        return EVENT_FEAR_INTENSITY * decay
+
     @staticmethod
-    def _apply_event_sentiment(companies: list[Company]) -> None:
+    def _apply_event_sentiment(companies: list[Company], intensity: float) -> None:
         """Transmit an active Black Swan as a negative sentiment impulse.
 
         This does NOT move price — it moves crowd sentiment (bad news), which
         the behavioral engine then trades on. The hit is heterogeneous per
-        company (seeded from the ticker) so sectors diverge, and it decays each
-        tick toward the impulse floor rather than snapping to it.
+        company (seeded from the ticker) and scaled by the decaying panic
+        `intensity`, so as the shock fades sentiment mean-reverts toward zero.
         """
         for company in companies:
             bias = (sum(ord(ch) for ch in company.ticker) % 100) / 100.0  # 0..1
-            impulse = -EVENT_SENTIMENT_HIT * (0.5 + bias)
+            impulse = -EVENT_SENTIMENT_HIT * (0.5 + bias) * intensity
             company.sentiment = max(
                 -1.0, min(1.0, company.sentiment * EVENT_SENTIMENT_DECAY + impulse)
             )

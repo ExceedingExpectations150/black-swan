@@ -1,41 +1,28 @@
 "use client";
 
-// Startup terminal: full-black screen, green monospace boot sequence typed out
-// character by character, ending in a prompt for the Black Swan event. On
-// submit it arms the event (/api/event) and starts the simulation (/api/start),
-// then reveals the dashboard.
-
-import { useEffect, useRef, useState } from "react";
-import { API_BASE } from "@/lib/socket";
+import { useEffect, useState } from "react";
 
 const BOOT_LINES: string[] = [
-  "BLACK SWAN TERMINAL v1.0",
+  "NEWS & MARKET SIMULATOR v1.0",
   "",
-  "> booting neuro-symbolic market twin .......... OK",
+  "> initializing simulation engine ............. OK",
   "> loading global company registry ............ 51 firms",
-  "> TimesFM quant funds ........................ ONLINE",
-  "> Gemma behavioral cohorts ................... ONLINE",
-  "> continuous double auction + anchor feed .... LIVE",
+  "> booting generative news desk ............... ONLINE",
+  "> connecting timeseries forecasting .......... ONLINE",
+  "> continuous double auction feed ............. LIVE",
   "",
-  "> system ready. awaiting directive.",
-  "",
+  "> system ready.",
+  "> ENGAGING...",
 ];
 
 const CHARS_PER_TICK = 3;
 const CHAR_MS = 16;
-const LINE_PAUSE_MS = 70;
-
-type Phase = "boot" | "prompt" | "launching";
+const LINE_PAUSE_MS = 100;
 
 export default function BootTerminal({ onLaunch }: { onLaunch: () => void }) {
   const [rendered, setRendered] = useState<string[]>([]);
   const [partial, setPartial] = useState("");
-  const [phase, setPhase] = useState<Phase>("boot");
-  const [value, setValue] = useState("");
-  const [launchLines, setLaunchLines] = useState<string[]>([]);
-  const inputRef = useRef<HTMLInputElement | null>(null);
 
-  // Type the boot sequence out, one character at a time.
   useEffect(() => {
     let line = 0;
     let char = 0;
@@ -43,9 +30,11 @@ export default function BootTerminal({ onLaunch }: { onLaunch: () => void }) {
 
     const step = () => {
       if (line >= BOOT_LINES.length) {
-        setPhase("prompt");
+        // Animation finished, wait a moment then launch
+        timer = setTimeout(onLaunch, 500);
         return;
       }
+      
       const text = BOOT_LINES[line];
       if (char < text.length) {
         char = Math.min(text.length, char + CHARS_PER_TICK);
@@ -59,36 +48,10 @@ export default function BootTerminal({ onLaunch }: { onLaunch: () => void }) {
         timer = setTimeout(step, LINE_PAUSE_MS);
       }
     };
+    
     timer = setTimeout(step, 300);
     return () => clearTimeout(timer);
-  }, []);
-
-  useEffect(() => {
-    if (phase === "prompt") inputRef.current?.focus();
-  }, [phase]);
-
-  const handleSubmit = async () => {
-    const headline = value.trim();
-    if (!headline || phase !== "prompt") return;
-    setPhase("launching");
-    setLaunchLines([
-      `> BLACK SWAN ARMED: "${headline}"`,
-      "> releasing agents into the market ...",
-      "> ENGAGING.",
-    ]);
-    try {
-      await fetch(`${API_BASE}/api/event`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ headline }),
-      });
-      await fetch(`${API_BASE}/api/start`, { method: "POST" });
-    } catch {
-      // If the backend is unreachable we still reveal the dashboard; it will
-      // reconnect and show empty states rather than blocking on the terminal.
-    }
-    setTimeout(onLaunch, 1400);
-  };
+  }, [onLaunch]);
 
   return (
     <div className="crt fixed inset-0 z-50 overflow-hidden bg-black">
@@ -97,38 +60,8 @@ export default function BootTerminal({ onLaunch }: { onLaunch: () => void }) {
         <pre className="term-green whitespace-pre-wrap font-mono text-[13px] leading-relaxed md:text-sm">
           {rendered.join("\n")}
           {partial && `\n${partial}`}
-          {phase === "prompt" && (
-            <>
-              {"\n"}
-              <span className="term-bright">DEFINE BLACK SWAN EVENT:</span>
-            </>
-          )}
+          <span className="term-cursor">█</span>
         </pre>
-
-        {phase === "prompt" && (
-          <div className="mt-4 flex items-center gap-2 font-mono text-sm">
-            <span className="term-bright">❯</span>
-            <div className="relative flex-1 max-w-3xl">
-              <input
-                ref={inputRef}
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-                spellCheck={false}
-                autoComplete="off"
-                placeholder="e.g. sovereign default triggers global margin calls"
-                className="term-input w-full bg-transparent outline-none"
-              />
-            </div>
-          </div>
-        )}
-
-        {phase === "launching" && (
-          <pre className="term-green mt-2 whitespace-pre-wrap font-mono text-sm">
-            {launchLines.join("\n")}
-            <span className="term-cursor">█</span>
-          </pre>
-        )}
       </div>
     </div>
   );

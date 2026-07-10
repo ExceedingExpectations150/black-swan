@@ -78,16 +78,15 @@ def _extract_last_paragraph(raw: str) -> str:
     return non_empty[-1] if non_empty else ""
 
 
-class CorporatePRDesk:
-    """Writes one in-character PR post per company via a single batched call."""
+class NewsPublisher:
+    """Writes one credible financial news blurb per company via a single batched call."""
 
     def __init__(self, router: GeminiModelRouter) -> None:
         self.router = router
 
     def _build_prompt(self, companies: list[CompanyPRContext], macro_headline: str) -> str:
         lines: list[str] = [
-            "You are simulating the official corporate PR social-media accounts of "
-            "the companies listed below, all reacting to the same market day.",
+            "You are simulating a prestigious financial news desk (e.g., Reuters, Bloomberg) reporting live market updates.",
             "",
             f"Today's macro headline: {macro_headline}",
             "",
@@ -102,9 +101,9 @@ class CorporatePRDesk:
             )
         lines += [
             "",
-            "For EACH company above, its PR account writes exactly ONE social post "
-            "(under 280 characters) reacting to its own situation and the macro "
-            "headline, in a believable in-character corporate voice. No hashtag spam.",
+            "For EACH company above, your news desk writes exactly ONE short breaking news snippet "
+            "(under 280 characters) reporting on its situation and the macro headline in a credible, "
+            "objective financial journalism voice. No corporate hype.",
             "",
             "Output ONLY a strict JSON array, no markdown fences, no commentary, "
             "with one object per company, exactly like:",

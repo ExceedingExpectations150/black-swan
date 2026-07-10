@@ -106,7 +106,7 @@ class GeminiModelRouter:
                 last_status = resp.status
                 body: str = await resp.text()
 
-            if last_status == 429 and attempt < MAX_RETRIES:
+            if last_status >= 429 and attempt < MAX_RETRIES:
                 self._rotate_on_rate_limit()
                 await asyncio.sleep(BACKOFF_BASE_SECONDS * (2**attempt))
                 continue

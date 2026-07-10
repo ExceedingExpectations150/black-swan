@@ -171,6 +171,7 @@ def reset_world() -> int:
     from models import (
         AgentHolding,
         Company,
+        CompanySnapshot,
         EconomySnapshot,
         OrderBook,
         PriceTick,
@@ -185,6 +186,7 @@ def reset_world() -> int:
             SocialPost,
             EconomySnapshot,
             WorldState,
+            CompanySnapshot,
             AgentHolding,
             AgentState,
         ):

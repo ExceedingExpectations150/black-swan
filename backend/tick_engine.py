@@ -53,6 +53,7 @@ from models import (
     AgentType,
     AuthorType,
     Company,
+    CompanySnapshot,
     OrderBook,
     OrderStatus,
     OrderType,
@@ -60,7 +61,7 @@ from models import (
     SocialPost,
     WorldState,
 )
-from social_agents import CompanyPRContext, CorporatePRDesk, MacroAnalyst, PostDraft
+from social_agents import CompanyPRContext, MacroAnalyst, NewsPublisher, PostDraft
 
 logger = logging.getLogger("chaosnet.tick")
 
@@ -222,7 +223,7 @@ class TickEngine:
         self.forecaster = forecaster
         self.matching_engine = matching_engine or MatchingEngine()
         self.session_factory = session_factory
-        self.pr_desk = CorporatePRDesk(router)
+        self.pr_desk = NewsPublisher(router)
         self.analyst = MacroAnalyst(router)
         self.behavioral = LocalBehavioralEngine()
         self.event_analyst = EventImpactAnalyst(router)
@@ -293,6 +294,11 @@ class TickEngine:
             )
             events.append(_event("price_update", tick_id, {"prices": price_updates}))
 
+            # Event-aware financial news feed (local, fast — reacts to the
+            # headline and the actual movers this tick).
+            posts = self._local_news(db, tick_id, companies, active_event, price_updates, rng)
+            events += [_event("social_post", tick_id, _post_payload(p)) for p in posts]
+
             snapshot = compute_economy_snapshot(db, tick_id)
             persist_economy_snapshot(db, snapshot)
 
@@ -329,10 +335,119 @@ class TickEngine:
                     system_stress_index=snapshot["system_stress_index"],
                 )
             )
+            # Point-in-time snapshot powering time-travel (/api/history + the
+            # timeline scrubber).
+            db.add_all(
+                CompanySnapshot(
+                    tick_id=tick_id,
+                    ticker=c.ticker,
+                    current_price=c.current_price,
+                    sentiment=c.sentiment,
+                    volatility=c.volatility,
+                    is_bankrupt=c.is_bankrupt,
+                )
+                for c in companies
+            )
             db.commit()
 
         events.append(_event("tick_end", tick_id, clock))
         return events
+
+    # ------------------------------------------------------------------ #
+    # Local financial-news feed (event-aware, no LLM)                     #
+    # ------------------------------------------------------------------ #
+
+    def _local_news(
+        self,
+        db: Session,
+        tick_id: int,
+        companies: list[Company],
+        active_event: str,
+        price_updates: list[dict[str, Any]],
+        rng: random.Random,
+    ) -> list[SocialPost]:
+        """1-3 financial-news posts per tick reacting to the event and movers.
+
+        API-free so the feed is always live and always tied to what the market
+        is doing. A newswire headline on the biggest mover, a periodic macro
+        read during an event, and a company statement from the hardest-hit name.
+        """
+        change = {p["ticker"]: p["change_pct"] for p in price_updates}
+        ranked = sorted(companies, key=lambda c: change.get(c.ticker, 0.0))
+        losers = [c for c in ranked if change.get(c.ticker, 0.0) < -0.2][:3]
+        gainers = [c for c in reversed(ranked) if change.get(c.ticker, 0.0) > 0.2][:2]
+        event = active_event.strip()
+        posts: list[SocialPost] = []
+
+        mover = losers[0] if losers else (gainers[0] if gainers else None)
+        if mover is not None:
+            pct = change.get(mover.ticker, 0.0)
+            if pct < 0:
+                text = rng.choice(
+                    [
+                        f"BREAKING: {mover.name} ({mover.ticker}) slides {pct:.1f}% as sellers dominate the tape.",
+                        f"{mover.name} shares fall {pct:.1f}%; traders cite {event or 'broad risk-off flows'}.",
+                    ]
+                )
+                sentiment = -0.7
+            else:
+                text = rng.choice(
+                    [
+                        f"{mover.name} ({mover.ticker}) climbs {pct:+.1f}% on renewed buying interest.",
+                        f"Money rotates into {mover.name}, up {pct:+.1f}% intraday.",
+                    ]
+                )
+                sentiment = 0.6
+            posts.append(self._mk_post(db, tick_id, AuthorType.ANALYST, None,
+                                       "@MarketWire", "MarketWire", text, sentiment))
+
+        if event and tick_id % 3 == 0:
+            n_red = sum(1 for v in change.values() if v < 0)
+            text = (
+                f"MACRO DESK: {event} — {n_red} names trading lower. "
+                f"Correlations rising; desks flag a classic risk-off session."
+            )
+            posts.append(self._mk_post(db, tick_id, AuthorType.ANALYST, None,
+                                       "@GlobalMacro", "Global Macro Desk", text, -0.5))
+
+        if event and losers and rng.random() < 0.5:
+            c = losers[0]
+            text = rng.choice(
+                [
+                    f"{c.name} says it remains focused on long-term fundamentals amid today's volatility.",
+                    f"{c.name} confirms operations are unaffected by current market conditions.",
+                ]
+            )
+            handle = "@" + re.sub(r"[^a-z0-9]", "", c.name.lower())[:15]
+            posts.append(self._mk_post(db, tick_id, AuthorType.COMPANY, c.ticker,
+                                       handle, c.name, text, 0.1))
+        return posts
+
+    def _mk_post(
+        self,
+        db: Session,
+        tick_id: int,
+        author_type: AuthorType,
+        ticker: str | None,
+        handle: str,
+        display: str,
+        content: str,
+        sentiment: float,
+    ) -> SocialPost:
+        post = SocialPost(
+            post_id=str(uuid.uuid4()),
+            tick_id=tick_id,
+            author_type=author_type,
+            author_ticker=ticker,
+            author_display=display,
+            handle=handle,
+            content=content,
+            sentiment=sentiment,
+            likes=int(240 * abs(sentiment)) + 12,
+            reposts=(int(240 * abs(sentiment)) + 12) // 5,
+        )
+        db.add(post)
+        return post
 
     def refresh_forecasts(self) -> None:
         """Recompute the event-conditioned forecast (read-only, off-thread).

@@ -113,6 +113,22 @@ export interface StateSnapshot {
   economy: Economy;
   social: SocialPostT[];
   tick_id: number;
+  // Playback status (merged from the controller's status payload).
+  paused: boolean;
+  tick_interval_seconds: number;
+  max_ticks: number | null;
+  duration_days: number | null;
+  ticks_per_day: number | null;
 }
 
 export type ConnectionStatus = "connecting" | "open" | "closed";
+
+export interface Alert {
+  id: string;
+  tick_id: number;
+  ts: string;
+  severity: "critical" | "warning" | "info";
+  title: string;
+  message: string;
+  read: boolean;
+}

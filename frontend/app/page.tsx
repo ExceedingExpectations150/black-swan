@@ -10,10 +10,14 @@ import Sidebar, { type NavKey } from "@/components/Sidebar";
 import MarketOverview from "@/components/MarketOverview";
 import TopMovers from "@/components/TopMovers";
 import AnalystPanel from "@/components/AnalystPanel";
+import NewsFeed from "@/components/NewsFeed";
 import EconomyPanel from "@/components/EconomyPanel";
 import CompanyDetail from "@/components/CompanyDetail";
 import StockMarketView from "@/components/StockMarketView";
 import BootTerminal from "@/components/BootTerminal";
+import AlertsPanel from "@/components/AlertsPanel";
+import TimelineSlider from "@/components/TimelineSlider";
+import SimulationSetupModal from "@/components/SimulationSetupModal";
 
 // react-simple-maps is client-only; skip SSR to avoid window/hydration issues.
 const WorldMap = dynamic(() => import("@/components/WorldMap"), {
@@ -54,6 +58,8 @@ export default function Home() {
         </main>
       </div>
       <CompanyDetail />
+      <TimelineSlider />
+      <SimulationSetupModal />
     </div>
   );
 }
@@ -77,6 +83,14 @@ function MainContent({ nav }: { nav: NavKey }) {
     );
   }
 
+  if (nav === "social") {
+    return (
+      <div className="min-h-0 flex-1">
+        <NewsFeed />
+      </div>
+    );
+  }
+
   if (nav === "market") {
     return (
       <div className="panel min-h-0 flex-1 p-3">
@@ -93,11 +107,8 @@ function MainContent({ nav }: { nav: NavKey }) {
 
   if (nav === "alerts") {
     return (
-      <div className="panel flex min-h-0 flex-1 items-center justify-center">
-        <div className="text-center">
-          <div className="section-title">Alerts</div>
-          <div className="mt-2 text-xs text-ink3">No active alerts.</div>
-        </div>
+      <div className="min-h-0 flex-1 flex flex-col">
+        <AlertsPanel />
       </div>
     );
   }

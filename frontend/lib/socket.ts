@@ -12,6 +12,7 @@ import type {
   Envelope,
   MarketIndex,
   PriceUpdatePayload,
+  SocialPostT,
   StateSnapshot,
 } from "./types";
 
@@ -26,6 +27,7 @@ function dispatch(env: Envelope): void {
   switch (env.type) {
     case "tick_start":
       s.setClock(env.payload as SimClock);
+      s.setLatestTick(env.tick_id);
       break;
     case "news":
       s.setNews((env.payload as { headline: string }).headline);
@@ -38,6 +40,18 @@ function dispatch(env: Envelope): void {
       break;
     case "economy_update":
       s.setEconomy(env.payload as never);
+      break;
+    case "social_post":
+      s.addSocialPost(env.payload as SocialPostT);
+      break;
+    case "sim_status": {
+      const p = env.payload as any;
+      s.setSimStatus(p.paused, p.tick_interval_seconds, p.pausing_in_progress, p.max_ticks, p.duration_days, p.ticks_per_day);
+      break;
+    }
+    case "reset":
+      // Hard refresh to fully clear frontend state safely
+      window.location.reload();
       break;
     case "tick_end":
     default:

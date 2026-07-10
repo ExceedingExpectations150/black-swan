@@ -16,6 +16,7 @@ import type {
   SocialPostT,
   StateSnapshot,
   VolumePoint,
+  Alert,
 } from "./types";
 
 const PRICE_SERIES_CAP = 512;
@@ -35,6 +36,8 @@ interface StoreState {
   social: SocialPostT[];
   economy: Economy | null;
   indices: MarketIndex[];
+  latestTickId: number;
+  scrubbedTickId: number | null;
   news: string;
   tickId: number;
   clock: SimClock | null;
@@ -42,6 +45,13 @@ interface StoreState {
   selectedTicker: string | null;
   watchlist: string[];
   hydrated: boolean;
+  alerts: Alert[];
+  isPaused: boolean;
+  isPausing: boolean;
+  tickInterval: number;
+  maxTicks: number | null;
+  durationDays: number | null;
+  ticksPerDay: number | null;
 
   // actions
   hydrate: (snapshot: StateSnapshot) => void;
@@ -66,8 +76,13 @@ interface StoreState {
   addSocialPost: (post: SocialPostT) => void;
   setEconomy: (economy: Economy) => void;
   setNews: (headline: string) => void;
-  setTick: (tickId: number) => void;
+  setLatestTick: (tickId: number) => void;
   mergePriceSeries: (ticker: string, points: PricePoint[]) => void;
+  dismissAlert: (id: string) => void;
+  markAllAlertsRead: () => void;
+  fetchHistory: (tickId: number) => Promise<void>;
+  clearHistory: () => void;
+  setSimStatus: (paused: boolean, tickInterval: number, isPausing?: boolean, maxTicks?: number | null, durationDays?: number | null, ticksPerDay?: number | null) => void;
 }
 
 export const useStore = create<StoreState>((set) => ({
@@ -77,19 +92,32 @@ export const useStore = create<StoreState>((set) => ({
   social: [],
   economy: null,
   indices: [],
-  news: "",
+  latestTickId: 0,
+  scrubbedTickId: null,
+  news: "Awaiting market open...",
   tickId: 0,
   clock: null,
   connectionStatus: "connecting",
   selectedTicker: null,
   watchlist: ["AAPL", "NVDA", "TSLA", "JPM", "2222.SR"],
   hydrated: false,
+  alerts: [],
+  isPaused: false,
+  isPausing: false,
+  tickInterval: 1.0,
+  maxTicks: null,
+  durationDays: null,
+  ticksPerDay: null,
 
   hydrate: (snapshot) =>
-    set(() => {
+    set((s) => {
       const companies: Record<string, Company> = {};
       for (const c of snapshot.companies) companies[c.ticker] = c;
       const social = snapshot.social.slice(0, SOCIAL_CAP);
+      // If the backend has wiped the DB, snapshot.tick_id will be 0.
+      // We must forcefully reset the frontend's latestTickId so the setup modal appears.
+      const isFreshDB = snapshot.tick_id === 0;
+      
       return {
         companies,
         social,
@@ -97,6 +125,12 @@ export const useStore = create<StoreState>((set) => ({
         news: "",
         tickId: snapshot.tick_id,
         clock: (snapshot as unknown as { clock?: SimClock }).clock ?? null,
+        latestTickId: isFreshDB ? 0 : Math.max(s.latestTickId, snapshot.tick_id),
+        isPaused: snapshot.paused,
+        tickInterval: snapshot.tick_interval_seconds,
+        maxTicks: snapshot.max_ticks ?? s.maxTicks,
+        durationDays: snapshot.duration_days ?? s.durationDays,
+        ticksPerDay: snapshot.ticks_per_day ?? s.ticksPerDay,
         hydrated: true,
       };
     }),
@@ -115,6 +149,7 @@ export const useStore = create<StoreState>((set) => ({
 
   applyPriceUpdate: (prices, tickId) =>
     set((s) => {
+      if (s.scrubbedTickId !== null) return s;
       const companies = { ...s.companies };
       const priceSeries = { ...s.priceSeries };
       const volumeSeries = { ...s.volumeSeries };
@@ -136,15 +171,29 @@ export const useStore = create<StoreState>((set) => ({
         vol.push({ t: tickId, v: p.volume });
         volumeSeries[p.ticker] = vol.slice(-PRICE_SERIES_CAP);
       }
-      return { companies, priceSeries, volumeSeries };
+      return { companies, priceSeries, volumeSeries, tickId };
     }),
 
   applyCompanyUpdate: (updates) =>
     set((s) => {
+      if (s.scrubbedTickId !== null) return s;
       const companies = { ...s.companies };
+      const newAlerts: Alert[] = [];
+      const now = new Date().toISOString();
       for (const u of updates) {
         const existing = companies[u.ticker];
         if (existing) {
+          if (!existing.is_bankrupt && u.is_bankrupt) {
+             newAlerts.push({
+               id: Math.random().toString(36).substring(7),
+               tick_id: s.latestTickId,
+               ts: now,
+               severity: "critical",
+               title: "Bankruptcy Declared",
+               message: `${existing.name} (${existing.ticker}) has filed for bankruptcy.`,
+               read: false,
+             });
+          }
           companies[u.ticker] = {
             ...existing,
             sentiment: u.sentiment,
@@ -154,19 +203,52 @@ export const useStore = create<StoreState>((set) => ({
           };
         }
       }
-      return { companies };
+      return { 
+        companies, 
+        alerts: newAlerts.length > 0 ? [...newAlerts, ...s.alerts].slice(0, 100) : s.alerts 
+      };
     }),
 
   addSocialPost: (post) =>
-    set((s) => ({ social: [post, ...s.social].slice(0, SOCIAL_CAP) })),
+    set((s) => {
+      if (s.scrubbedTickId !== null) return s;
+      return { social: [post, ...s.social].slice(0, SOCIAL_CAP) };
+    }),
 
-  setEconomy: (economy) => set({ economy }),
-  setNews: (news) => set({ news }),
-  setTick: (tickId) => set({ tickId }),
+  setEconomy: (economy) => set((s) => {
+    if (s.scrubbedTickId !== null) return s;
+    let newAlerts: Alert[] = [];
+    if (s.economy && s.economy.system_stress_index < 0.8 && economy.system_stress_index >= 0.8) {
+      newAlerts.push({
+         id: Math.random().toString(36).substring(7),
+         tick_id: economy.tick_id,
+         ts: new Date().toISOString(),
+         severity: "critical",
+         title: "Extreme Market Stress",
+         message: `System stress index has reached ${economy.system_stress_index.toFixed(2)}. Contagion risk is high.`,
+         read: false,
+      });
+    } else if (s.economy && s.economy.system_stress_index < 0.6 && economy.system_stress_index >= 0.6) {
+      newAlerts.push({
+         id: Math.random().toString(36).substring(7),
+         tick_id: economy.tick_id,
+         ts: new Date().toISOString(),
+         severity: "warning",
+         title: "Elevated Market Stress",
+         message: `System stress index is climbing (${economy.system_stress_index.toFixed(2)}).`,
+         read: false,
+      });
+    }
+    return {
+      economy,
+      alerts: newAlerts.length > 0 ? [...newAlerts, ...s.alerts].slice(0, 100) : s.alerts
+    };
+  }),
+  setNews: (news) => set((s) => s.scrubbedTickId !== null ? s : { news }),
+  setLatestTick: (tickId) => set({ latestTickId: tickId }),
 
   mergePriceSeries: (ticker, points) =>
     set((s) => {
-      // Backfill from REST: keep the longer of (backfill, live) and dedupe by t.
       const live = s.priceSeries[ticker] ?? [];
       const byT = new Map<number, PricePoint>();
       for (const p of points) byT.set(p.t, p);
@@ -175,7 +257,6 @@ export const useStore = create<StoreState>((set) => ({
         .sort((a, b) => a.t - b.t)
         .slice(-PRICE_SERIES_CAP);
 
-      // Volume backfill: only points that actually carry a volume value.
       const liveVol = s.volumeSeries[ticker] ?? [];
       const volByT = new Map<number, number>();
       for (const p of points) if (p.volume != null) volByT.set(p.t, p.volume);
@@ -190,6 +271,44 @@ export const useStore = create<StoreState>((set) => ({
         volumeSeries: { ...s.volumeSeries, [ticker]: mergedVol },
       };
     }),
+
+  dismissAlert: (id) => set((s) => ({ alerts: s.alerts.filter((a) => a.id !== id) })),
+  markAllAlertsRead: () => set((s) => ({ alerts: s.alerts.map((a) => ({ ...a, read: true })) })),
+
+  fetchHistory: async (tickId) => {
+    set({ scrubbedTickId: tickId });
+    try {
+      const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+      const res = await fetch(`${API_BASE}/api/history/${tickId}`);
+      if (!res.ok) return;
+      const snapshot = await res.json();
+      set((s) => {
+        const companies = { ...s.companies };
+        for (const c of snapshot.companies) companies[c.ticker] = c;
+        return {
+           companies,
+           economy: snapshot.economy,
+           social: snapshot.social,
+           tickId: snapshot.tick_id, // Fix: Use tickId instead of overwriting latestTickId
+           hydrated: true,
+        };
+      });
+    } catch {
+      //
+    }
+  },
+
+  clearHistory: () => {
+    set({ scrubbedTickId: null });
+    // so we trigger a hydrate immediately.
+    const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+    fetch(`${API_BASE}/api/state`).then(r => r.json()).then(snapshot => {
+      useStore.getState().hydrate(snapshot);
+    }).catch(() => {});
+  },
+
+  setSimStatus: (paused, interval, isPausing = false, maxTicks = null, durationDays = null, ticksPerDay = null) =>
+    set({ isPaused: paused, tickInterval: interval, isPausing, maxTicks, durationDays, ticksPerDay }),
 }));
 
 // Company list as a MEMOIZED hook. A raw selector returning Object.values()

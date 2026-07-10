@@ -32,6 +32,11 @@ VALUE_WEIGHT: float = 0.15
 SENTIMENT_WEIGHT: float = 0.03
 EVENT_FEAR_WEIGHT: float = 0.03
 BASE_NOISE_SIGMA: float = 0.008
+# Always-on market factor: one small systematic draw per tick shared by the
+# whole crowd, so names co-move (market beta) and the market "breathes" with
+# realistic intraday wander even with no event active — instead of sitting flat
+# at the open. Mean zero, so it adds texture without a built-in drift.
+MARKET_FACTOR_VOL: float = 0.0035
 # Per-tick expected-return clamp so no single order sits absurdly far from the
 # current price (keeps limit prices — and therefore clearing prices — sane).
 MAX_EXPECTED_RETURN: float = 0.20
@@ -97,6 +102,10 @@ class LocalBehavioralEngine:
         when it materializes these into OrderBook rows.
         """
         intents: dict[str, list[dict[str, Any]]] = {}
+        # One systematic market factor per tick, shared by the whole crowd, so
+        # names co-move and the market breathes even with no event (realistic
+        # open instead of a flat tape).
+        market_factor = rng.gauss(0.0, MARKET_FACTOR_VOL)
         for company in companies:
             hist = histories.get(company.ticker) or [company.current_price]
             recent_return = 0.0
@@ -118,6 +127,7 @@ class LocalBehavioralEngine:
                     + VALUE_WEIGHT * traits.value * value_gap
                     + SENTIMENT_WEIGHT * traits.sentiment * sentiment
                     - EVENT_FEAR_WEIGHT * traits.fear * event_intensity
+                    + market_factor
                     + noise
                 )
                 expected_return = max(

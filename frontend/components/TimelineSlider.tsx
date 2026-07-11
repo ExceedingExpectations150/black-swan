@@ -12,7 +12,7 @@ export default function TimelineSlider() {
   const ticksPerDay = useStore((s) => s.ticksPerDay);
   const fetchHistory = useStore((s) => s.fetchHistory);
   const clearHistory = useStore((s) => s.clearHistory);
-  const connection = useStore((s) => s.connection);
+  const connection = useStore((s) => s.connectionStatus);
 
   const [sliderValue, setSliderValue] = useState<number>(latestTickId);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);

@@ -43,7 +43,14 @@ function dispatch(env: Envelope): void {
       s.setEconomy(env.payload as never);
       break;
     case "sim_status": {
-      const p = env.payload as any;
+      const p = env.payload as {
+        paused: boolean;
+        tick_interval_seconds: number;
+        pausing_in_progress?: boolean;
+        max_ticks?: number | null;
+        duration_days?: number | null;
+        ticks_per_day?: number | null;
+      };
       s.setSimStatus(p.paused, p.tick_interval_seconds, p.pausing_in_progress, p.max_ticks, p.duration_days, p.ticks_per_day);
       break;
     }

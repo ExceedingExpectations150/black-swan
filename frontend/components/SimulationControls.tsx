@@ -9,7 +9,7 @@ export default function SimulationControls() {
   const isPaused = useStore((s) => s.isPaused);
   const isPausing = useStore((s) => s.isPausing);
   const tickInterval = useStore((s) => s.tickInterval);
-  const connection = useStore((s) => s.connection);
+  const connection = useStore((s) => s.connectionStatus);
 
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingResume, setIsLoadingResume] = useState(false);

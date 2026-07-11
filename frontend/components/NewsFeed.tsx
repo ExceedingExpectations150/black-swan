@@ -1,6 +1,6 @@
 "use client";
 
-import { Newspaper, Heart, Repeat2, TrendingUp, TrendingDown, Minus, X } from "lucide-react";
+import { Newspaper, Heart, Repeat2, X } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { sentimentColor, monogram, timeAgo } from "@/lib/format";
 import type { SocialPostT } from "@/lib/types";

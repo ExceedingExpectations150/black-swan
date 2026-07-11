@@ -46,3 +46,15 @@ Skills for this repo live in `.agents/skills/` (universal directory read by
 Codex and other agents; `skills-lock.json` pins sources). Claude may invoke
 you synchronously via `codex exec` using the `codex` skill; treat those
 prompts as coming from Claude and answer tersely.
+
+## Task routing (your lane)
+
+You and Claude split work by benchmark-backed strengths. Your lane:
+terminal/shell automation, build and environment setup, bulk mechanical
+edits (renames, lint sweeps, boilerplate, test scaffolding, repetitive
+migrations), isolated single-file functions and scripts, log trawls, and
+first-pass review sweeps. Claude's lane: architecture, multi-file
+features, whole-repo debugging, frontend design, orchestration, and final
+review. When a task Claude hands you turns out to need repo-wide judgment
+or design taste, say so in your answer instead of guessing — Claude will
+take it back. Keep your outputs tight; they are drafts Claude verifies.

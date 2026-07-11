@@ -116,6 +116,7 @@ export default function StockMarketView() {
 
   const points = useStore((s) => (activeTicker ? s.priceSeries[activeTicker] : undefined));
   const company = useStore((s) => (activeTicker ? s.companies[activeTicker] : undefined));
+  const durationDays = useStore((s) => s.durationDays);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -228,22 +229,26 @@ export default function StockMarketView() {
     candleRef.current.setData(bucketed.candles);
     volRef.current.setData(bucketed.volumes);
     // Never fitContent(): stretching a handful of candles across the full
-    // width produces giant blocks. Fixed barSpacing keeps candles thin and
-    // uniform (real-chart behavior). While the whole run still fits in the
-    // pane, pin the FIRST candle to the left edge so the tape grows
-    // rightward from the session open; once it overflows, follow the live
-    // edge like a real terminal.
+    // width produces giant blocks. Instead size candles off the PLANNED run
+    // length (one candle per sim day) so the finished run fills the pane,
+    // clamped to 6-24px so candles stay readable but never balloon. While
+    // the run still fits, pin the FIRST candle to the left edge so the tape
+    // grows rightward from the session open; once it overflows, follow the
+    // live edge like a real terminal.
     if (bucketed.candles.length > 0) {
       const ts = chartRef.current.timeScale();
       const paneWidth = (containerRef.current?.clientWidth ?? 0) - 70; // price scale
-      const capacity = Math.max(10, Math.floor(paneWidth / 6)); // bars at 6px spacing
+      const expected = Math.max(durationDays ?? 30, bucketed.candles.length + 2);
+      const spacing = Math.min(24, Math.max(6, Math.floor(paneWidth / expected)));
+      ts.applyOptions({ barSpacing: spacing });
+      const capacity = Math.max(10, Math.floor(paneWidth / spacing));
       if (bucketed.candles.length <= capacity) {
         ts.setVisibleLogicalRange({ from: -1, to: capacity });
       } else {
         ts.scrollToRealTime();
       }
     }
-  }, [bucketed]);
+  }, [bucketed, durationDays]);
 
   const hasData = bucketed.candles.length > 0;
   const divergence =

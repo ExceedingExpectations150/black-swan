@@ -134,26 +134,42 @@ export default function LiveStockChart({ ticker }: { ticker: string }) {
   }, [ticker]);
 
   // Push the merged series into the chart; recolor by trend.
+  const prevRef = useRef<{ len: number; first: number | null; rising: boolean | null }>({
+    len: 0,
+    first: null,
+    rising: null,
+  });
   useEffect(() => {
     const series = seriesRef.current;
     const chart = chartRef.current;
     if (!series || !chart) return;
     const data = toAreaData(points ?? []);
-    series.setData(data);
+    const prev = prevRef.current;
+    const first = data.length > 0 ? (data[0].time as number) : null;
+    // Fast path: one point appended to the same series -> O(1) update()
+    // instead of a full setData() + fitContent() re-layout every tick.
+    const appended =
+      prev.len > 0 && data.length - prev.len === 1 && first !== null && first === prev.first;
+    if (appended) {
+      series.update(data[data.length - 1]);
+    } else {
+      series.setData(data);
+      if (data.length > 0) chart.timeScale().fitContent();
+    }
     if (data.length >= 2) {
       const rising = data[data.length - 1].value >= data[0].value;
-      const color = rising ? UP : DOWN;
-      series.applyOptions({
-        lineColor: color,
-        topColor: rising
-          ? "rgba(22,198,12,0.28)"
-          : "rgba(255,77,79,0.28)",
-        bottomColor: rising
-          ? "rgba(22,198,12,0.00)"
-          : "rgba(255,77,79,0.00)",
-      });
+      if (rising !== prev.rising) {
+        const color = rising ? UP : DOWN;
+        series.applyOptions({
+          lineColor: color,
+          topColor: rising ? "rgba(22,198,12,0.28)" : "rgba(255,77,79,0.28)",
+          bottomColor: rising ? "rgba(22,198,12,0.00)" : "rgba(255,77,79,0.00)",
+        });
+      }
+      prevRef.current = { len: data.length, first, rising };
+    } else {
+      prevRef.current = { len: data.length, first, rising: prev.rising };
     }
-    if (data.length > 0) chart.timeScale().fitContent();
   }, [points]);
 
   // REAL-market anchor reference line.

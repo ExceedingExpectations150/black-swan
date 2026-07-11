@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import time
@@ -124,14 +125,19 @@ class ConnectionManager:
             self._clients.remove(websocket)
 
     async def broadcast(self, payload: dict[str, Any]) -> None:
-        dead: list[WebSocket] = []
-        for client in self._clients:
-            try:
-                await client.send_json(payload)
-            except Exception:
-                dead.append(client)
-        for client in dead:
-            self.disconnect(client)
+        if not self._clients:
+            return
+        # Serialize ONCE per event (send_json would re-dump the same dict for
+        # every client) and fan out concurrently instead of serially.
+        text = json.dumps(payload)
+        clients = list(self._clients)
+        results = await asyncio.gather(
+            *(client.send_text(text) for client in clients),
+            return_exceptions=True,
+        )
+        for client, result in zip(clients, results):
+            if isinstance(result, BaseException):
+                self.disconnect(client)
 
 
 class SimulationController:

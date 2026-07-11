@@ -12,7 +12,7 @@ import json
 import statistics
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from models import Company, EconomySnapshot, PriceTick
@@ -41,24 +41,31 @@ def _change_pct(company: Company) -> float:
     return (company.current_price - company.anchor_price) / company.anchor_price * 100
 
 
-def _company_volatility(db: Session, ticker: str) -> float:
-    """Population stdev of the last RETURNS_WINDOW tick-over-tick returns.
+def _company_volatilities(db: Session) -> dict[str, float]:
+    """Population stdev of the last RETURNS_WINDOW tick-over-tick returns,
+    for every ticker in ONE query (was one query per company — 51 round
+    trips per tick). Every ticker gets one PriceTick per tick, so a tick_id
+    window bounds each series to RETURNS_WINDOW + 1 points.
 
-    Returns 0.0 when fewer than MIN_PRICE_POINTS price points exist.
+    Tickers with fewer than MIN_PRICE_POINTS points get 0.0.
     """
-    prices = list(
-        db.scalars(
-            select(PriceTick.price)
-            .where(PriceTick.ticker == ticker)
-            .order_by(PriceTick.tick_id.desc())
-            .limit(RETURNS_WINDOW + 1)
-        )
-    )
-    if len(prices) < MIN_PRICE_POINTS:
-        return 0.0
-    prices.reverse()
-    returns = [(after - before) / before for before, after in zip(prices, prices[1:])]
-    return statistics.pstdev(returns)
+    latest = db.scalar(select(func.max(PriceTick.tick_id))) or 0
+    rows = db.execute(
+        select(PriceTick.ticker, PriceTick.price)
+        .where(PriceTick.tick_id > latest - (RETURNS_WINDOW + 1))
+        .order_by(PriceTick.tick_id)
+    ).all()
+    series: dict[str, list[float]] = {}
+    for ticker, price in rows:
+        series.setdefault(ticker, []).append(price)
+    out: dict[str, float] = {}
+    for ticker, prices in series.items():
+        if len(prices) < MIN_PRICE_POINTS:
+            out[ticker] = 0.0
+            continue
+        returns = [(after - before) / before for before, after in zip(prices, prices[1:])]
+        out[ticker] = statistics.pstdev(returns)
+    return out
 
 
 def compute_economy_snapshot(db: Session, tick_id: int) -> dict:
@@ -69,11 +76,12 @@ def compute_economy_snapshot(db: Session, tick_id: int) -> dict:
     """
     companies = list(db.scalars(select(Company)))
 
+    computed = _company_volatilities(db)
     change_pcts: dict[str, float] = {}
     volatilities: dict[str, float] = {}
     for company in companies:
         change_pcts[company.ticker] = _change_pct(company)
-        volatility = _company_volatility(db, company.ticker)
+        volatility = computed.get(company.ticker, 0.0)
         volatilities[company.ticker] = volatility
         company.volatility = volatility
 

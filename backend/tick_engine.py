@@ -297,7 +297,7 @@ class TickEngine:
             )
             retail = [a for a in agents if a.agent_type == AgentType.GEMMA_RETAIL_COHORT]
             institutional = [a for a in agents if a.agent_type == AgentType.TIMESFM_INSTITUTIONAL]
-            holdings = self._load_holdings(db, agents)
+            holdings, holding_rows = self._load_holdings(db, agents)
             recent_posts: list[SocialPost] = list(
                 db.execute(
                     select(SocialPost).order_by(SocialPost.tick_id.desc()).limit(SOCIAL_DIGEST_POSTS)
@@ -369,7 +369,7 @@ class TickEngine:
 
                 # 6. CDA per ticker (the one and only matching engine).
                 price_updates = self._clear_markets(
-                    db, tick_id, companies, orders, agents, holdings
+                    db, tick_id, companies, orders, agents, holdings, holding_rows
                 )
                 events.append(_event("price_update", tick_id, {"prices": price_updates}))
 
@@ -958,12 +958,20 @@ class TickEngine:
         orders: list[OrderBook],
         agents: list[AgentState],
         holdings: dict[str, dict[str, int]],
+        holding_rows: dict[tuple[str, str], AgentHolding],
     ) -> list[dict[str, Any]]:
         by_agent = {a.agent_id: a for a in agents}
         price_updates: list[dict[str, Any]] = []
 
+        # Group once instead of rescanning the full order list per company
+        # (O(companies x orders) with ~700 orders/tick and growing with
+        # BLACKSWAN_RETAIL_COHORTS).
+        orders_by_ticker: dict[str, list[OrderBook]] = {}
+        for o in orders:
+            orders_by_ticker.setdefault(o.ticker, []).append(o)
+
         for company in companies:
-            book = [o for o in orders if o.ticker == company.ticker]
+            book = orders_by_ticker.get(company.ticker, [])
             clearing_price, transactions, volume = self.matching_engine.resolve_order_book(
                 book, company.current_price
             )
@@ -995,7 +1003,7 @@ class TickEngine:
             )
 
         db.add_all(orders)
-        self._flush_holdings(db, holdings)
+        self._flush_holdings(db, holdings, holding_rows)
         for agent in agents:
             if agent.cash_balance <= 0:
                 agent.is_bankrupt = True
@@ -1037,15 +1045,27 @@ class TickEngine:
 
     def _load_holdings(
         self, db: Session, agents: list[AgentState]
-    ) -> dict[str, dict[str, int]]:
+    ) -> tuple[dict[str, dict[str, int]], dict[tuple[str, str], AgentHolding]]:
+        """One full read of agent_holdings, reused for the end-of-tick flush.
+
+        Returns (quantities, row map) so _flush_holdings never re-scans the
+        table — with 155 agents x 51 tickers that second scan was ~7.9k ORM
+        rows materialized every tick for nothing.
+        """
         holdings: dict[str, dict[str, int]] = {a.agent_id: {} for a in agents}
+        rows: dict[tuple[str, str], AgentHolding] = {}
         for row in db.execute(select(AgentHolding)).scalars():
+            rows[(row.agent_id, row.ticker)] = row
             if row.agent_id in holdings:
                 holdings[row.agent_id][row.ticker] = row.quantity
-        return holdings
+        return holdings, rows
 
-    def _flush_holdings(self, db: Session, holdings: dict[str, dict[str, int]]) -> None:
-        rows = {(r.agent_id, r.ticker): r for r in db.execute(select(AgentHolding)).scalars()}
+    def _flush_holdings(
+        self,
+        db: Session,
+        holdings: dict[str, dict[str, int]],
+        rows: dict[tuple[str, str], AgentHolding],
+    ) -> None:
         for agent_id, per_ticker in holdings.items():
             for ticker, qty in per_ticker.items():
                 row = rows.get((agent_id, ticker))
@@ -1057,18 +1077,23 @@ class TickEngine:
     def _load_price_histories(
         self, db: Session, companies: list[Company]
     ) -> dict[str, list[float]]:
-        histories: dict[str, list[float]] = {}
+        # Single batched query instead of one per ticker (51 round trips per
+        # tick). Every ticker gets one PriceTick per tick, so a tick_id
+        # window bounds each ticker's series to <= TIMESFM_CONTEXT points.
+        latest = db.scalar(select(func.max(PriceTick.tick_id))) or 0
+        rows = db.execute(
+            select(PriceTick.ticker, PriceTick.price)
+            .where(PriceTick.tick_id > latest - TIMESFM_CONTEXT)
+            .order_by(PriceTick.tick_id)
+        ).all()
+        histories: dict[str, list[float]] = {c.ticker: [] for c in companies}
+        for ticker, price in rows:
+            series = histories.get(ticker)
+            if series is not None:
+                series.append(price)
         for c in companies:
-            rows = list(
-                db.execute(
-                    select(PriceTick.price)
-                    .where(PriceTick.ticker == c.ticker)
-                    .order_by(PriceTick.tick_id.desc())
-                    .limit(TIMESFM_CONTEXT)
-                ).scalars()
-            )
-            rows.reverse()
-            histories[c.ticker] = rows if rows else [c.anchor_price]
+            if not histories[c.ticker]:
+                histories[c.ticker] = [c.anchor_price]
         return histories
 
     @staticmethod

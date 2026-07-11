@@ -11,7 +11,7 @@ import {
   Star,
   Circle,
 } from "lucide-react";
-import { useStore, useCompanyList } from "@/lib/store";
+import { useStore } from "@/lib/store";
 import { fmtPrice, fmtPct, changeClass } from "@/lib/format";
 import Sparkline from "@/components/Sparkline";
 
@@ -34,14 +34,15 @@ export default function Sidebar({
   active: NavKey;
   onNavigate: (key: NavKey) => void;
 }) {
-  const companies = useCompanyList();
+  const companies = useStore((s) => s.companies);
   const watchlist = useStore((s) => s.watchlist);
   const indices = useStore((s) => s.indices);
   const connection = useStore((s) => s.connectionStatus);
   const setSelectedTicker = useStore((s) => s.setSelectedTicker);
 
-  const byTicker = Object.fromEntries(companies.map((c) => [c.ticker, c]));
-  const watched = watchlist.map((t) => byTicker[t]).filter(Boolean);
+  // companies is already a Record — index it directly instead of
+  // rebuilding an Object.fromEntries map of all 51 entries every render.
+  const watched = watchlist.map((t) => companies[t]).filter(Boolean);
   const globalSpark = indices[0]?.sparkline ?? [];
   const isOpen = connection === "open";
 

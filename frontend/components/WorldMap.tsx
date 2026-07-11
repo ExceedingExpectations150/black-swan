@@ -110,7 +110,26 @@ function MarkerNodeBase({
   );
 }
 
-const MarkerNode = memo(MarkerNodeBase);
+// Custom comparator: `node` is a fresh object every tick (the store clones
+// companies on each price update), but the marker only draws from these
+// fields — compare them by value so 51 SVG subtrees stop re-rendering on
+// every tick.
+const MarkerNode = memo(MarkerNodeBase, (prev, next) => {
+  const a = prev.node;
+  const b = next.node;
+  return (
+    prev.selected === next.selected &&
+    prev.showLabel === next.showLabel &&
+    a.radius === b.radius &&
+    a.color === b.color &&
+    a.pulse === b.pulse &&
+    a.company.ticker === b.company.ticker &&
+    a.company.name === b.company.name &&
+    a.company.lon === b.company.lon &&
+    a.company.lat === b.company.lat &&
+    a.company.is_bankrupt === b.company.is_bankrupt
+  );
+});
 
 function Tooltip({ company }: { company: Company }) {
   return (
@@ -162,13 +181,16 @@ export default function WorldMap() {
     const maxLog = caps.length ? Math.max(...caps) : 1;
     const span = maxLog - minLog || 1;
     return companies.map((c) => {
-      const radius =
+      const raw =
         c.market_cap > 0
           ? Math.max(
               MIN_RADIUS,
               Math.min(MAX_RADIUS, MIN_RADIUS + ((Math.log(c.market_cap) - minLog) / span) * (MAX_RADIUS - MIN_RADIUS)),
             )
           : MIN_RADIUS;
+      // Quantize to 0.5px steps: per-tick market-cap jitter would otherwise
+      // change every radius microscopically and defeat MarkerNode's memo.
+      const radius = Math.round(raw * 2) / 2;
       return {
         company: c,
         radius,

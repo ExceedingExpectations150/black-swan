@@ -189,13 +189,19 @@ export const useStore = create<StoreState>((set) => ({
             market_cap: p.price * existing.shares_outstanding,
           };
         }
-        const series = priceSeries[p.ticker] ? [...priceSeries[p.ticker]] : [];
-        series.push({ t, tick: tickId, price: p.price, volume: p.volume });
-        priceSeries[p.ticker] = series.slice(-PRICE_SERIES_CAP);
+        // Single-copy append (a spread + slice per ticker per tick doubles
+        // the allocation churn at 51 symbols/tick).
+        const series = priceSeries[p.ticker] ?? [];
+        const trimmedSeries =
+          series.length >= PRICE_SERIES_CAP ? series.slice(1 - PRICE_SERIES_CAP) : [...series];
+        trimmedSeries.push({ t, tick: tickId, price: p.price, volume: p.volume });
+        priceSeries[p.ticker] = trimmedSeries;
 
-        const vol = volumeSeries[p.ticker] ? [...volumeSeries[p.ticker]] : [];
-        vol.push({ t, v: p.volume });
-        volumeSeries[p.ticker] = vol.slice(-PRICE_SERIES_CAP);
+        const vol = volumeSeries[p.ticker] ?? [];
+        const trimmedVol =
+          vol.length >= PRICE_SERIES_CAP ? vol.slice(1 - PRICE_SERIES_CAP) : [...vol];
+        trimmedVol.push({ t, v: p.volume });
+        volumeSeries[p.ticker] = trimmedVol;
       }
       return { companies, priceSeries, volumeSeries, tickId };
     }),

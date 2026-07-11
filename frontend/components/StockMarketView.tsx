@@ -117,6 +117,10 @@ export default function StockMarketView() {
   const points = useStore((s) => (activeTicker ? s.priceSeries[activeTicker] : undefined));
   const company = useStore((s) => (activeTicker ? s.companies[activeTicker] : undefined));
   const durationDays = useStore((s) => s.durationDays);
+  // Ticker membership rarely changes; key the 51-button strip on the joined
+  // symbol list so it stops re-rendering on every price tick.
+  const tickerKey = companies.map((c) => c.ticker).join(",");
+  const tickers = useMemo(() => (tickerKey ? tickerKey.split(",") : []), [tickerKey]);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -223,11 +227,42 @@ export default function StockMarketView() {
   }, [activeTicker]);
 
   const bucketed = useMemo(() => bucketize(points ?? []), [points]);
+  const prevRef = useRef<{ ticker: string | null; times: (number | string)[] }>({
+    ticker: null,
+    times: [],
+  });
 
   useEffect(() => {
     if (!candleRef.current || !volRef.current || !chartRef.current) return;
-    candleRef.current.setData(bucketed.candles);
-    volRef.current.setData(bucketed.volumes);
+    const candles = bucketed.candles;
+    const prev = prevRef.current;
+    // Fast path: same series, at most one new candle appended -> O(1)
+    // series.update() calls instead of a full setData() rebuild every tick.
+    const grew = candles.length - prev.times.length;
+    const anchorIdx = prev.times.length - 1; // previous tail keeps its time
+    const sameSeries =
+      prev.ticker === activeTicker &&
+      prev.times.length > 0 &&
+      (grew === 0 || grew === 1) &&
+      candles[0]?.time === prev.times[0] &&
+      candles[anchorIdx]?.time === prev.times[anchorIdx];
+    if (sameSeries) {
+      const last = candles.length - 1;
+      if (candles.length > prev.times.length && last > 0) {
+        // A new candle opened: finalize the previous one first (it is still
+        // the series' tail at this moment), then append the new tail.
+        candleRef.current.update(candles[last - 1]);
+        volRef.current.update(bucketed.volumes[last - 1]);
+      }
+      candleRef.current.update(candles[last]);
+      volRef.current.update(bucketed.volumes[last]);
+    } else {
+      candleRef.current.setData(candles);
+      volRef.current.setData(bucketed.volumes);
+    }
+    const countChanged = candles.length !== prev.times.length;
+    prevRef.current = { ticker: activeTicker, times: candles.map((c) => c.time as number) };
+    if (!countChanged && sameSeries) return; // no re-anchoring needed mid-candle
     // Never fitContent(): stretching a handful of candles across the full
     // width produces giant blocks. Instead size candles off the PLANNED run
     // length (one candle per sim day) so the finished run fills the pane,
@@ -259,19 +294,19 @@ export default function StockMarketView() {
   return (
     <div className="flex h-full flex-col">
       <div className="mb-2 flex items-center gap-1.5 overflow-x-auto scroll-thin pb-1">
-        {companies.map((c) => {
-          const on = c.ticker === activeTicker;
+        {tickers.map((t) => {
+          const on = t === activeTicker;
           return (
             <button
-              key={c.ticker}
-              onClick={() => setActiveTicker(c.ticker)}
+              key={t}
+              onClick={() => setActiveTicker(t)}
               className={`shrink-0 rounded-sm border px-2 py-0.5 text-[11px] transition ${
                 on
                   ? "border-white/25 bg-white/10 text-ink"
                   : "border-hair text-ink2 hover:bg-white/[0.04] hover:text-ink"
               }`}
             >
-              <span className="tnum">{c.ticker}</span>
+              <span className="tnum">{t}</span>
             </button>
           );
         })}

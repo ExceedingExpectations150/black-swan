@@ -12,12 +12,15 @@ Missing dependencies or credentials raise hard errors by design.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from typing import Any, Final
 
 import aiohttp
 import numpy as np
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -58,12 +61,16 @@ class GeminiModelRouter:
     def __init__(self) -> None:
         primary: str | None = os.getenv("GEMINI_API_KEY_PRIMARY")
         backup: str | None = os.getenv("GEMINI_API_KEY_BACKUP")
-        if not primary or not backup:
-            raise RuntimeError(
-                "GEMINI_API_KEY_PRIMARY and GEMINI_API_KEY_BACKUP must be set in .env — "
-                "behavioral cohorts have no mock fallback by design (PRD rule 4.1)."
+        # Keyless operation is allowed: the market must run for anyone who
+        # clones the repo. Every LLM call site catches RuntimeError and falls
+        # back to real-data paths (heuristic traders, keyword event analyst,
+        # factual wire reports, offline desk briefs) — degradation, not mocks.
+        self._keys: list[str] = [k for k in (primary, backup) if k]
+        if not self._keys:
+            logger.warning(
+                "No GEMINI_API_KEY_PRIMARY/BACKUP set — LLM prose disabled; "
+                "running on TimesFM + behavioral agents with factual fallbacks."
             )
-        self._keys: list[str] = [primary, backup]
         self._key_index: int = 0
         self._model: str = PRIMARY_MODEL
 
@@ -84,6 +91,8 @@ class GeminiModelRouter:
 
     async def prompt_cohort(self, session: aiohttp.ClientSession, prompt_text: str) -> str:
         """Send one behavioral prompt and return the model's text response."""
+        if not self._keys:
+            raise RuntimeError("Gemini disabled: no API keys configured (keyless mode).")
         payload: dict[str, Any] = {
             "contents": [{"parts": [{"text": prompt_text}]}],
             "generationConfig": {"maxOutputTokens": MAX_OUTPUT_TOKENS},

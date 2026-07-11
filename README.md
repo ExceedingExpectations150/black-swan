@@ -33,6 +33,12 @@ and the crash emerges from panicked order flow.
 - **A simulated clock.** Each tick advances simulated market time
   (`24h / ticks_per_day`); charts show real dates, the terminal clock shows
   sim time, and a run is a configurable number of simulated days.
+- **A professional trading workstation.** Boot terminal → simulation setup
+  console (duration / ticks-per-day / speed per run) → dashboard with world
+  map, candlestick charts, movers, news wire, a daily market reporter
+  (@DailyBrief), a senior-trader chat desk grounded in live statistics,
+  timeline rewind, keyboard view switching (1–7), and a live status bar
+  (link / mode / tick / day / sim clock).
 
 ## Compute & AI resource usage
 
@@ -43,7 +49,16 @@ and the crash emerges from panicked order flow.
 | **Yahoo Finance** (`yfinance`) | Real anchor prices for the 51 seeded companies + real index strip (S&P/NASDAQ/DOW/FTSE/Nikkei) | Hosted API, unauthenticated |
 
 The simulation itself (matching engine, behavioral agents, economy) is pure
-Python — no external compute.
+Python — no external compute. **The compute-heavy AI component (TimesFM
+inference, batched across all 51 tickers in one forward pass every refresh
+cycle) is standard PyTorch with no CUDA-only code — it deploys unmodified
+on AMD Instinct/Radeon GPUs via ROCm.** Fireworks is not used; the only
+hosted AI dependency is the optional Google Generative Language API.
+
+**Zero-credential run:** the project is fully runnable with no API keys at
+all — TimesFM + the behavioral swarm drive the market, the newsroom files
+factual wire reports computed from real simulation data, and the trading
+desk answers from live statistics (verified end-to-end in keyless mode).
 
 ## Run it
 
@@ -51,9 +66,9 @@ Backend (Python 3.12, FastAPI):
 
 ```bash
 cd backend
-python -m venv .venv && .venv/Scripts/activate   # Windows
-pip install -r requirements.txt
-cp ../.env.example .env                          # add GEMINI keys (optional)
+python -m venv .venv && .venv/Scripts/activate   # Windows (source .venv/bin/activate on Linux)
+pip install -r requirements.txt                  # first run downloads the TimesFM checkpoint (~800MB)
+cp ../.env.example .env                          # Gemini keys OPTIONAL — runs without any
 python -m uvicorn main:app --port 8000
 ```
 
@@ -66,9 +81,11 @@ npm run dev        # http://localhost:5055
 ```
 
 Open http://localhost:5055, wait for the boot sequence, type a Black Swan
-event, press Enter. The dashboard reveals; Stock Market view shows daily
-candlesticks bucketed from real intraday ticks. Every new simulation starts
-from a fresh seeded world at tick 1.
+event, press Enter, configure the run in the setup console (duration,
+ticks per day, speed), and launch. Keys 1–7 switch views; the Stock Market
+view shows daily candlesticks bucketed from real intraday ticks; the
+status bar tracks tick/day/sim-time live. Every refresh is a clean start:
+a new simulation always begins from a fresh seeded world at tick 1.
 
 > Backend on a non-default port? Set `NEXT_PUBLIC_API_BASE` /
 > `NEXT_PUBLIC_WS_URL` in `frontend/.env.local`.
@@ -98,21 +115,26 @@ momentum/volatility/forecast statistics.
 ```
 backend/
   main.py               FastAPI app + SimulationController (run loop, sim clock,
-                        fresh-start reset, /api/start|stop|reset|event, /ws)
+                        fresh-start reset, /api/start|stop|reset|event|chat, /ws)
   tick_engine.py        The per-tick orchestrator: news -> agents -> orders ->
                         CDA clearing -> settlement -> economy (steps 1-8 in its docstring)
   behavioral_agents.py  The always-on trader strategies (fundamentalist/chartist/noise)
-  ai_clients.py         TimesFM forecaster (local) + Gemini router (429-rotating)
+  event_analyst.py      Your headline -> per-sector impact JSON (LLM, keyword fallback)
+  ai_clients.py         TimesFM forecaster (local, batched) + Gemini router (429-rotating)
   matching_engine.py    Continuous double auction: crossing, midpoint pricing
+  economy.py            Sector rollups, movers, system stress index
+  social_agents.py      News desk, PR agents, DailyReporter (@DailyBrief wire reports)
+  trader_agent.py       Senior-trader chat: live momentum/volatility/forecast briefs
   database.py           Seeding: real anchor prices, 155 agents, starting holdings
   models.py             SQLAlchemy schema (world/agents/orders/prices/social/economy)
-  tests/                pytest suites incl. test_behavioral_agents.py (proves the
-                        market clears real volume and that panic moves prices
-                        through order flow only)
+  tests/                suites incl. test_behavioral_agents.py (proves the market
+                        clears real volume and that panic moves prices through
+                        order flow only) — run each directly with python
 frontend/
-  app/page.tsx          Boot terminal gate -> dashboard shell
-  components/           BootTerminal, WorldMap, StockMarketView (candles),
-                        TopBar (sim clock), TimelineSlider, panels
+  app/page.tsx          Boot terminal gate -> dashboard shell + keyboard nav
+  components/           BootTerminal, SimulationSetupModal, WorldMap,
+                        StockMarketView (candles), ChatPanel (Trading Desk),
+                        TopBar (sim clock), TimelineSlider, StatusBar, panels
   lib/store.ts          zustand store; lib/socket.ts WS envelope dispatch
 ```
 

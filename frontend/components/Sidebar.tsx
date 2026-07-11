@@ -4,6 +4,7 @@ import {
   LayoutDashboard,
   LineChart,
   MessagesSquare,
+  MessageSquareText,
   Radar,
   BarChart3,
   Bell,
@@ -14,7 +15,7 @@ import { useStore, useCompanyList } from "@/lib/store";
 import { fmtPrice, fmtPct, changeClass } from "@/lib/format";
 import Sparkline from "@/components/Sparkline";
 
-export type NavKey = "dashboard" | "market" | "social" | "nodes" | "analytics" | "alerts";
+export type NavKey = "dashboard" | "market" | "social" | "nodes" | "analytics" | "desk" | "alerts";
 
 const NAV: { key: NavKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -22,6 +23,7 @@ const NAV: { key: NavKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "social", label: "News Feed", icon: MessagesSquare },
   { key: "nodes", label: "Company Nodes", icon: Radar },
   { key: "analytics", label: "Analytics", icon: BarChart3 },
+  { key: "desk", label: "Trading Desk", icon: MessageSquareText },
   { key: "alerts", label: "Alerts", icon: Bell },
 ];
 

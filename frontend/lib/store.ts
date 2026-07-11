@@ -44,8 +44,8 @@ interface StoreState {
   maxTicks: number | null;
   durationDays: number | null;
   ticksPerDay: number | null;
-  /** True once the boot terminal armed the event and started the run itself. */
-  bootLaunched: boolean;
+  /** Headline armed at the boot terminal — prefills the setup console. */
+  armedEvent: string;
   /** Current simulated time (epoch seconds) — advances with the sim clock. */
   simTime: number | null;
 
@@ -79,7 +79,7 @@ interface StoreState {
   fetchHistory: (tickId: number) => Promise<void>;
   clearHistory: () => void;
   setSimStatus: (paused: boolean, tickInterval: number, isPausing?: boolean, maxTicks?: number | null, durationDays?: number | null, ticksPerDay?: number | null) => void;
-  setBootLaunched: () => void;
+  setArmedEvent: (headline: string) => void;
   setSimTime: (epochSeconds: number) => void;
   /** Clear all per-run state after the backend wiped the world (soft reset —
    *  no page reload, so a client sitting on the boot terminal is unaffected). */
@@ -108,7 +108,7 @@ export const useStore = create<StoreState>((set) => ({
   maxTicks: null,
   durationDays: null,
   ticksPerDay: null,
-  bootLaunched: false,
+  armedEvent: "",
   simTime: null,
 
   hydrate: (snapshot) =>
@@ -306,7 +306,12 @@ export const useStore = create<StoreState>((set) => ({
     try {
       const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
       const res = await fetch(`${API_BASE}/api/history/${tickId}`);
-      if (!res.ok) return;
+      if (!res.ok) {
+        // No snapshot for that tick — release the scrub freeze instead of
+        // leaving the dashboard stuck on stale data with no history shown.
+        set({ scrubbedTickId: null });
+        return;
+      }
       const snapshot = await res.json();
       set((s) => {
         const companies = { ...s.companies };
@@ -336,7 +341,7 @@ export const useStore = create<StoreState>((set) => ({
   setSimStatus: (paused, interval, isPausing = false, maxTicks = null, durationDays = null, ticksPerDay = null) =>
     set({ isPaused: paused, tickInterval: interval, isPausing, maxTicks, durationDays, ticksPerDay }),
 
-  setBootLaunched: () => set({ bootLaunched: true }),
+  setArmedEvent: (headline) => set({ armedEvent: headline }),
 
   setSimTime: (epochSeconds) => set({ simTime: epochSeconds }),
 

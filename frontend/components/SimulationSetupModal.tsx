@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Play, Loader2, Calendar, Settings, Zap } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { API_BASE } from "@/lib/socket";
@@ -8,16 +8,19 @@ import { API_BASE } from "@/lib/socket";
 export default function SimulationSetupModal() {
   const latestTickId = useStore((s) => s.latestTickId);
   const connection = useStore((s) => s.connectionStatus);
-  const bootLaunched = useStore((s) => s.bootLaunched);
+  const armedEvent = useStore((s) => s.armedEvent);
 
-  // Show this modal if we are connected but the simulation is exactly at Tick 0.
-  // Once it starts (tick > 0), the modal disappears forever. When the boot
-  // terminal already armed and started the run, stay hidden while tick 1 is
-  // still being computed — the modal remains the fallback if that start failed.
-  const shouldShow = connection === "open" && latestTickId === 0 && !bootLaunched;
+  // The setup console: shown when connected and the world is at tick 0
+  // (every page load resets to state zero, so each session configures its
+  // own run here). Disappears once the run starts producing ticks.
+  const shouldShow = connection === "open" && latestTickId === 0;
 
   const [isLoading, setIsLoading] = useState(false);
   const [scenario, setScenario] = useState("");
+  // Prefill with the headline armed at the boot terminal.
+  useEffect(() => {
+    if (armedEvent) setScenario(armedEvent);
+  }, [armedEvent]);
   const [durationDays, setDurationDays] = useState(30);
   // 4 ticks/day (6-hour) by default so daily candles carry real OHLC range.
   const [ticksPerDay, setTicksPerDay] = useState(4);

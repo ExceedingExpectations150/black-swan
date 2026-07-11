@@ -1,10 +1,13 @@
 "use client";
 
 // Startup terminal: full-black screen, green monospace boot sequence typed out
-// character by character, ending in a prompt for the Black Swan event. On
-// submit it arms the event (/api/event) and starts the simulation (/api/start),
-// then reveals the dashboard. If the backend is unreachable the dashboard is
-// revealed anyway and the SimulationSetupModal takes over as the fallback.
+// character by character, ending in a prompt for the Black Swan event.
+//
+// Every page load is STATE ZERO: mounting this screen resets the backend
+// world (any previous run is stopped and wiped). Submitting the prompt only
+// ARMS the event (/api/event) — the run itself is configured and launched
+// from the setup console on the dashboard, so duration, resolution, and
+// speed are adjustable on every run.
 
 import { useEffect, useRef, useState } from "react";
 import { API_BASE } from "@/lib/socket";
@@ -139,10 +142,6 @@ function DitheredCoin() {
   );
 }
 
-// Same defaults the SimulationSetupModal uses: MAX speed, 30 days, 4 ticks
-// per day (6-hour resolution — gives every daily candle a real OHLC range).
-const DEFAULT_START = { speed: 0.0, duration_days: 30, ticks_per_day: 4 };
-
 type Phase = "boot" | "prompt" | "launching";
 
 export default function BootTerminal({ onLaunch }: { onLaunch: () => void }) {
@@ -152,6 +151,18 @@ export default function BootTerminal({ onLaunch }: { onLaunch: () => void }) {
   const [value, setValue] = useState("");
   const [launchLines, setLaunchLines] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const resetFired = useRef(false);
+
+  // STATE ZERO: a page load means a clean slate. Reset the world exactly
+  // once per mount (guarded against StrictMode double-invocation) so no
+  // ticks ever carry over from a previous session.
+  useEffect(() => {
+    if (resetFired.current) return;
+    resetFired.current = true;
+    void fetch(`${API_BASE}/api/reset`, { method: "POST" }).catch(() => {
+      // backend not up yet — the setup console will surface that instead
+    });
+  }, []);
 
   // Type the boot sequence out, one character at a time.
   useEffect(() => {
@@ -191,28 +202,22 @@ export default function BootTerminal({ onLaunch }: { onLaunch: () => void }) {
     setPhase("launching");
     setLaunchLines([
       `> BLACK SWAN ARMED: "${headline}"`,
-      "> releasing agents into the market ...",
-      "> ENGAGING.",
+      "> event analyst deriving market effects ...",
+      "> OPENING TRADING CONSOLE.",
     ]);
+    // Arm the event only — the setup console configures and launches the
+    // run, so duration/resolution/speed stay adjustable every time.
+    useStore.getState().setArmedEvent(headline);
     try {
       await fetch(`${API_BASE}/api/event`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ headline }),
       });
-      await fetch(`${API_BASE}/api/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(DEFAULT_START),
-      });
-      // The terminal armed and started the run itself, so the setup modal
-      // must stay hidden while the first tick is still being computed.
-      useStore.getState().setBootLaunched();
     } catch {
-      // If the backend is unreachable we still reveal the dashboard; the
-      // SimulationSetupModal will show (tick 0) and can start the run instead.
+      // Backend unreachable — the console will surface the failure on launch.
     }
-    setTimeout(onLaunch, 1400);
+    setTimeout(onLaunch, 1200);
   };
 
   return (

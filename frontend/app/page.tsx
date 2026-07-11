@@ -14,6 +14,7 @@ import CompanyDetail from "@/components/CompanyDetail";
 import StockMarketView from "@/components/StockMarketView";
 import BootTerminal from "@/components/BootTerminal";
 import AlertsPanel from "@/components/AlertsPanel";
+import ChatPanel from "@/components/ChatPanel";
 import TimelineSlider from "@/components/TimelineSlider";
 import SimulationSetupModal from "@/components/SimulationSetupModal";
 
@@ -90,6 +91,14 @@ function MainContent({ nav }: { nav: NavKey }) {
             AWAITING MARKET DATA
           </div>
         )}
+      </div>
+    );
+  }
+
+  if (nav === "desk") {
+    return (
+      <div className="min-h-0 flex-1">
+        <ChatPanel />
       </div>
     );
   }

@@ -32,9 +32,11 @@ export default function TimelineSlider() {
       clearTimeout(debounceRef.current);
     }
     
-    // Set a new debounced fetch
+    // Set a new debounced fetch. Releasing at or within one tick of the
+    // live edge snaps back to live — dragging "roughly to the end" must
+    // never leave the dashboard silently frozen on history.
     debounceRef.current = setTimeout(() => {
-      if (val >= latestTickId) {
+      if (val >= latestTickId - 1) {
         clearHistory();
       } else {
         fetchHistory(val);

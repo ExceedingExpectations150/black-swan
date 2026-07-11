@@ -64,13 +64,15 @@ export default function SimulationControls() {
     }
   };
 
-  const setDuration = async (ticks: number) => {
+  const setDuration = async (days: number) => {
     setIsLoading(true);
     try {
+      // Backend converts days -> ticks via the run's ticks_per_day, so the
+      // button labels finally mean what they say.
       await fetch(`${API_BASE}/api/duration`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ticks }),
+        body: JSON.stringify({ days }),
       });
       if (isPaused) {
         await fetch(`${API_BASE}/api/resume`, { method: "POST" });

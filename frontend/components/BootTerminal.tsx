@@ -76,18 +76,25 @@ function DitheredCoin() {
       octx.save();
       octx.translate(C, C);
       octx.scale(aw, 1);
-      // face: radial shading so the dither gets texture
-      const g = octx.createRadialGradient(-R * 0.35, -R * 0.35, R * 0.15, 0, 0, R);
-      g.addColorStop(0, "#e8e8e8");
-      g.addColorStop(0.72, "#9a9a9a");
-      g.addColorStop(1, "#5a5a5a");
+      // face: black inside — only the outlines carry green. The soft radial
+      // wash stays far below every Bayer threshold except near the rim, where
+      // its antialiased falloff dithers into a stippled edge.
+      const g = octx.createRadialGradient(0, 0, R * 0.55, 0, 0, R);
+      g.addColorStop(0, "#000000");
+      g.addColorStop(0.9, "#1a1a1a");
+      g.addColorStop(1, "#3a3a3a");
       octx.fillStyle = g;
       octx.beginPath();
       octx.arc(0, 0, R, 0, Math.PI * 2);
       octx.fill();
-      // rim
+      // rim: double green outline like a struck coin
       octx.strokeStyle = "#ffffff";
-      octx.lineWidth = 2;
+      octx.lineWidth = 2.5;
+      octx.stroke();
+      octx.beginPath();
+      octx.arc(0, 0, R * 0.82, 0, Math.PI * 2);
+      octx.lineWidth = 1;
+      octx.strokeStyle = "#b0b0b0";
       octx.stroke();
       // ₿ on the front face only; the back is a plain shaded disc
       if (w > 0.12) {

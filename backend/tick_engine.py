@@ -65,6 +65,7 @@ from social_agents import (
     NewsPublisher,
     PostDraft,
     render_factual,
+    render_factual_company_post,
 )
 
 logger = logging.getLogger("chaosnet.tick")
@@ -82,6 +83,14 @@ INSTITUTIONAL_INVENTORY_FRACTION: float = 0.05
 SOCIAL_DIGEST_POSTS: int = 8
 SENTIMENT_CARRYOVER: float = 0.7
 ANALYST_EVERY_N_TICKS: int = 5
+# LLM call budget. Free-tier flash allows ~10 requests/min, but an unpaced
+# tick loop fires several calls per tick and instantly 429-storms, forcing
+# every news/report path onto its fallback. Pace like a real newsroom:
+# the news desk publishes every N ticks, and the LLM swarm voices ONE
+# rotating cohort batch every M ticks (heuristic strategies carry the rest
+# of the crowd in between). Tune per key quota.
+NEWS_DESK_EVERY_N_TICKS: int = max(1, int(os.getenv("BLACKSWAN_NEWS_EVERY_N", "2")))
+SWARM_LLM_EVERY_N_TICKS: int = max(1, int(os.getenv("BLACKSWAN_SWARM_EVERY_N", "4")))
 TIMESFM_CONTEXT: int = 512
 # One-sided book pressure: when real orders exist but nothing crosses (e.g.
 # a panic where everyone sells and nobody bids), the indicative price moves
@@ -304,14 +313,29 @@ class TickEngine:
             self._apply_event_sentiment(companies, event_intensity)
 
             async with aiohttp.ClientSession() as http:
-                # 3 & 4. Run News Publisher and the behavioral swarm (Gemma)
-                # concurrently. TimesFM does NOT run in-tick: the slow refresh
-                # loop maintains forecast_cache off-thread and the tick reads
-                # a snapshot (empty until the first refresh lands — the quant
-                # funds simply sit out those first seconds).
-                news_task = self._run_news_desk(db, http, companies, active_event, tick_id)
-                swarm_task = self._run_swarm(
-                    http, companies, retail, holdings, recent_posts, active_event, tick_id
+                # 3 & 4. News desk and LLM swarm run on paced cadences (see
+                # the LLM call budget note above); the heuristic crowd trades
+                # every tick regardless. TimesFM does NOT run in-tick: the
+                # slow refresh loop maintains forecast_cache off-thread and
+                # the tick reads a snapshot (empty until the first refresh
+                # lands — the quant funds simply sit out those first seconds).
+                async def _no_posts() -> list[SocialPost]:
+                    return []
+
+                async def _no_swarm() -> tuple[list[OrderBook], set[str]]:
+                    return [], set()
+
+                news_task = (
+                    self._run_news_desk(db, http, companies, active_event, tick_id)
+                    if tick_id % NEWS_DESK_EVERY_N_TICKS == 0
+                    else _no_posts()
+                )
+                swarm_task = (
+                    self._run_swarm(
+                        http, companies, retail, holdings, recent_posts, active_event, tick_id
+                    )
+                    if tick_id % SWARM_LLM_EVERY_N_TICKS == 0
+                    else _no_swarm()
                 )
 
                 posts, swarm_result = await asyncio.gather(news_task, swarm_task)
@@ -473,10 +497,26 @@ class TickEngine:
             )
         except asyncio.TimeoutError:
             logger.warning("News desk call timed out after 60s (tick %d)", tick_id)
-            return []
+            drafts = []
         except RuntimeError as exc:
             logger.warning("News desk call failed (tick %d): %s", tick_id, exc)
-            return []
+            drafts = []
+
+        if not drafts:
+            # LLM unavailable: the wire still publishes — factual snippets
+            # for the session's biggest movers, built from real numbers only.
+            movers = sorted(contexts, key=lambda c: abs(c.change_pct), reverse=True)[:3]
+            drafts = [
+                PostDraft(
+                    ticker=c.ticker,
+                    content=render_factual_company_post(
+                        c.ticker, c.name, c.sector, c.change_pct, c.price, tick_id, headline
+                    ),
+                    sentiment=max(-1.0, min(1.0, c.change_pct / 5.0)),
+                    stance="neutral",
+                )
+                for c in movers
+            ]
 
         by_ticker = {c.ticker: c for c in companies}
         posts: list[SocialPost] = []
@@ -610,12 +650,14 @@ class TickEngine:
         batches = [
             retail[i : i + COHORT_BATCH_SIZE] for i in range(0, len(retail), COHORT_BATCH_SIZE)
         ]
-        results = await asyncio.gather(
-            *(run_batch(b, i * COHORT_BATCH_SIZE) for i, b in enumerate(batches))
-        )
-        orders = [order for built, _ in results for order in built]
-        decided_ids = set().union(*(decided for _, decided in results)) if results else set()
-        return orders, decided_ids
+        if not batches:
+            return [], set()
+        # ONE rotating batch per swarm cycle: each call voices a different
+        # cohort group (quota discipline), while the heuristic layer trades
+        # for everyone the LLM didn't decide for this tick.
+        idx = (tick_id // SWARM_LLM_EVERY_N_TICKS) % len(batches)
+        built, decided = await run_batch(batches[idx], idx * COHORT_BATCH_SIZE)
+        return built, decided
 
     # ------------------------------------------------------------------ #
     # Daily news reporter                                                 #
@@ -684,6 +726,10 @@ class TickEngine:
             )
         except (RuntimeError, asyncio.TimeoutError) as exc:
             logger.warning("daily reporter LLM failed (day %d): %s", day_index, exc)
+            content = render_factual(digest)
+        if not content.strip():
+            # An LLM "success" with empty/unparseable prose must never
+            # publish a blank wire post.
             content = render_factual(digest)
 
         post = SocialPost(
@@ -777,6 +823,10 @@ class TickEngine:
             self.event_impact_source = ""
             self._analyzed_event = ""
             return
+        # Supersede guard: if two analyses are in flight (event A then B),
+        # only the most recently REQUESTED one may commit its result —
+        # otherwise a slow A could overwrite B's impact map.
+        self._pending_event = event
         with self.session_factory() as db:
             companies = list(db.execute(select(Company)).scalars())
         sectors = sorted({c.sector for c in companies})
@@ -786,6 +836,8 @@ class TickEngine:
         except Exception as exc:  # never let analysis crash the refresh loop
             logger.warning("event analyst failed for %r: %s", event, exc)
             return
+        if getattr(self, "_pending_event", event) != event:
+            return  # a newer event superseded this analysis mid-flight
         self.event_impact = {
             c.ticker: sector_impact.get(c.sector, 0.0) for c in companies
         }

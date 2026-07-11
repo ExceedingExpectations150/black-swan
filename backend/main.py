@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 
@@ -192,7 +193,17 @@ class SimulationController:
         keeps the armed Black Swan headline (used when a new run resets the
         world after the event was already posted).
         """
-        Base.metadata.drop_all(bind=engine)
+        # A cancelled asyncio.to_thread() does NOT stop its worker thread; a
+        # refresh_forecasts() read can briefly hold the SQLite handle while
+        # we wipe. Retry the drop instead of 500ing the reset.
+        for attempt in range(3):
+            try:
+                Base.metadata.drop_all(bind=engine)
+                break
+            except Exception:
+                if attempt == 2:
+                    raise
+                time.sleep(0.5)
         init_db()
         created = seed_initial_market_state()
         logger.info("World reset. Seeded %d agents.", created)
@@ -437,19 +448,15 @@ async def stop_simulation() -> dict[str, Any]:
 @app.post("/api/reset")
 async def reset_simulation() -> dict[str, Any]:
     """Wipe the entire simulation database and restart from tick 1."""
-    was_running = controller.is_running
     # Both loops must stop BEFORE the wipe — the refresh worker thread must
     # not read tables while they drop. reset_world() nulls tick_engine,
     # which destroys the forecast/event caches with it.
     await controller.stop_ai_tasks()
 
     controller.reset_world(preserve_event=False)
-
-    if was_running:
-        controller.sim_start = datetime.now(timezone.utc)
-        controller.build_engines()
-        controller.forecast_task = asyncio.create_task(controller.forecast_refresh_loop())
-        controller.task = asyncio.create_task(controller.run_loop())
+    # Reset always lands on an IDLE world at tick 0. Nothing auto-restarts:
+    # the setup console owns launching runs (a page refresh resets to state
+    # zero and must not spawn an unconfigured background run).
 
     status = controller.get_status_payload()
     asyncio.create_task(controller.manager.broadcast({
@@ -501,7 +508,12 @@ async def set_speed(payload: SpeedPayload) -> dict[str, Any]:
 
 @app.post("/api/duration")
 async def set_duration(payload: DurationPayload) -> dict[str, Any]:
-    """Adjust the run length in simulated DAYS (converted via ticks_per_day)."""
+    """Set the run's TOTAL length in simulated days (not additional days).
+
+    Runs always begin at tick 1 under the state-zero flow, so the absolute
+    target is days * ticks_per_day. Shrinking below the current tick pauses
+    the run on its next iteration — that is the intended "cut it short".
+    """
     if controller.ticks_per_day is None:
         raise HTTPException(status_code=400, detail="Configure a run via /api/start first.")
     if payload.days <= 0:

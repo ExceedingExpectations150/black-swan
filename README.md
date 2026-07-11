@@ -74,7 +74,24 @@ from a fresh seeded world at tick 1.
 > `NEXT_PUBLIC_WS_URL` in `frontend/.env.local`.
 
 Tuning (env vars): `BLACKSWAN_RETAIL_COHORTS` (default 150),
-`BLACKSWAN_SWARM_BATCH` (cohorts per LLM call, default 50).
+`BLACKSWAN_SWARM_BATCH` (cohorts per LLM call, default 50),
+`BLACKSWAN_LLM_PRIMARY` / `BLACKSWAN_LLM_FALLBACK` (default
+`gemini-2.5-flash` / `gemini-2.0-flash`), `BLACKSWAN_NEWS_EVERY_N` /
+`BLACKSWAN_SWARM_EVERY_N` (LLM call pacing — the newsroom publishes every
+N ticks and ONE rotating cohort batch gets an LLM voice every M ticks, so
+free-tier quota is spent deliberately instead of 429-storming; heuristic
+traders and factual wire reports carry every other tick with real data).
+
+The agent pipeline per tick: **your headline → event analyst** (LLM, with
+a transparent keyword fallback) derives per-sector impacts → **company
+agents** absorb them (sentiment + repriced fundamentals) → **TimesFM
+forecasts conditioned** toward those fundamentals → **quant funds ladder
+orders** toward the conditioned forecast while the **behavioral swarm**
+trades its beliefs → the **matching engine** clears — prices only ever
+come from crossing orders. A daily reporter (@DailyBrief) files an
+end-of-day wire report at each simulated-day boundary, and the Trading
+Desk chat (`POST /api/chat`) answers with insight grounded in live
+momentum/volatility/forecast statistics.
 
 ## Main code path (start here)
 

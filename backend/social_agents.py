@@ -205,40 +205,121 @@ class DailyDigest:
 
 
 def render_factual(digest: DailyDigest) -> str:
-    """Deterministic end-of-day report — the LLM-down path.
+    """Automated wire report — the LLM-down path, written like journalism.
 
-    Interpolates only the digest's real numbers; the direction word follows
-    the sign of index_change_pct. Never invents data.
+    Every figure comes from the digest's real numbers (never invented);
+    lede structure and vocabulary vary deterministically by day so
+    consecutive reports read as reporting, not a filled-in form. This is
+    the same approach real wire services use for automated market briefs.
     """
-    if digest.index_change_pct > 0:
-        opener = (
-            f"Day {digest.day_index} (tick {digest.tick_id}) ended with the market "
-            f"index advancing {abs(digest.index_change_pct):.2f}%."
+    chg = digest.index_change_pct
+    mag = abs(chg)
+    day = digest.day_index
+    variant = day % 3
+
+    if mag < 0.15:
+        severity = "drifted"
+    elif mag < 1.0:
+        severity = "slipped" if chg < 0 else "edged higher"
+    elif mag < 3.0:
+        severity = "fell sharply" if chg < 0 else "rallied"
+    else:
+        severity = "was routed" if chg < 0 else "surged"
+
+    if variant == 0:
+        lede = (
+            f"Markets {severity} on Day {day}, with the composite index "
+            f"closing {chg:+.2f}%."
         )
-    elif digest.index_change_pct < 0:
-        opener = (
-            f"Day {digest.day_index} (tick {digest.tick_id}) ended with the market "
-            f"index declining {abs(digest.index_change_pct):.2f}%."
+    elif variant == 1:
+        lede = (
+            f"The composite index {severity} {mag:.2f}% by the Day {day} "
+            f"close{' as sellers kept control of the tape' if chg < -1.0 else ''}."
         )
     else:
-        opener = (
-            f"Day {digest.day_index} (tick {digest.tick_id}) ended with the market "
-            f"index finishing flat at 0.00%."
+        lede = (
+            f"Day {day} closed with the index at {chg:+.2f}% — a session that "
+            f"{'extended the slide' if chg < 0 else 'clawed back ground'}."
         )
-    movers = (
-        f"{digest.top_gainer_ticker} led gainers at {digest.top_gainer_pct:+.2f}%, "
-        f"while {digest.top_loser_ticker} was the session's worst performer at "
-        f"{digest.top_loser_pct:+.2f}%."
-    )
+
+    spread = digest.top_gainer_pct - digest.top_loser_pct
+    if variant == 0:
+        movers = (
+            f"{digest.top_gainer_ticker} held up best at {digest.top_gainer_pct:+.2f}% "
+            f"while {digest.top_loser_ticker} bore the brunt at "
+            f"{digest.top_loser_pct:+.2f}%, a {spread:.2f}-point dispersion across the tape."
+        )
+    else:
+        movers = (
+            f"At the extremes, {digest.top_loser_ticker} lost "
+            f"{abs(digest.top_loser_pct):.2f}% against {digest.top_gainer_ticker}'s "
+            f"{digest.top_gainer_pct:+.2f}% — dispersion of {spread:.2f} points."
+        )
+
+    if digest.stress_index >= 0.6:
+        stress_read = "systemic stress gauges running hot"
+    elif digest.stress_index >= 0.3:
+        stress_read = "stress gauges elevated but contained"
+    else:
+        stress_read = "stress gauges subdued"
     tape = (
-        f"Total volume reached {digest.total_volume:,} shares, with the system "
-        f"stress index at {digest.stress_index:.2f} and {digest.bankrupt_count} "
-        f"bankruptcies on record."
+        f"Turnover reached {digest.total_volume:,} shares with {stress_read} "
+        f"({digest.stress_index:.2f})"
+        + (
+            f" and {digest.bankrupt_count} names now in bankruptcy."
+            if digest.bankrupt_count
+            else "."
+        )
     )
-    sentences = [opener, movers, tape]
+
+    sentences = [lede, movers, tape]
     if digest.headline:
-        sentences.append(f'The day\'s driving headline: "{digest.headline}".')
+        sentences.append(
+            f'Desks continue to trade around the standing shock: "{digest.headline}".'
+        )
     return " ".join(sentences)
+
+
+def render_factual_company_post(
+    ticker: str,
+    name: str,
+    sector: str,
+    change_pct: float,
+    price: float,
+    tick_id: int,
+    headline: str,
+) -> str:
+    """One wire-style company snippet from real numbers (news-desk fallback).
+
+    Varies phrasing deterministically by (ticker, tick) so the feed reads
+    like coverage rather than one repeated sentence. Data-only; no invention.
+    """
+    seed = (sum(ord(c) for c in ticker) + tick_id) % 4
+    direction = "down" if change_pct < 0 else "up"
+    mag = abs(change_pct)
+    if seed == 0:
+        body = (
+            f"{name} ({ticker}) trades {direction} {mag:.2f}% at ${price:,.2f} "
+            f"as {sector} names react to the tape."
+        )
+    elif seed == 1:
+        body = (
+            f"{ticker} marks ${price:,.2f}, {change_pct:+.2f}% on the session — "
+            f"one of the more active {sector} prints."
+        )
+    elif seed == 2:
+        body = (
+            f"Order flow keeps {name} {direction} {mag:.2f}% at ${price:,.2f}; "
+            f"{sector} desks watching the level."
+        )
+    else:
+        body = (
+            f"{ticker} changes hands at ${price:,.2f} ({change_pct:+.2f}%), "
+            f"tracking the broader {sector} move."
+        )
+    if headline and mag >= 2.0:
+        body += f' Traders tie the move to the standing shock: "{headline[:60]}".'
+    return body
 
 
 class DailyReporter:

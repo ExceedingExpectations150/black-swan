@@ -58,6 +58,25 @@ down so any session (Claude, Codex, or human) can rerun it.
 - **Visual verification in Chrome** for anything user-visible; automation
   tabs throttle timers, so judge speed only in a foregrounded tab.
 
+## Ruflo orchestration (final stage)
+
+The final-stage build ran under ruflo v3.25.2: `ruflo init` (project-local;
+verify the GLOBAL ~/.claude/CLAUDE.md hash before/after — init overwrites
+the REPO CLAUDE.md, merge don't lose it), `ruflo swarm init --topology
+hierarchical`, decisions and milestones recorded via `ruflo memory store
+--namespace decisions|progress`. Named background agents (coder-b,
+coder-c2) executed isolated lanes with strict file scopes; Codex ran
+first-pass reviews and mechanical dedups; the integrator (main session)
+owned main.py/tick_engine.py wiring and every verification gate.
+
+## LLM quota discipline (hard lesson)
+
+An unpaced tick loop fires 8+ Gemini calls per tick and torches a free-tier
+day in minutes (observed: 208×429 in one short run — after which every
+model bucket reads `limit: 0` until the daily reset). The newsroom pacing
+constants exist for this; do not remove them. Full LLM fidelity needs a
+billing-enabled key or a genuinely distinct backup key for rotation.
+
 ## Known environment gotchas
 
 - Never `npm run build` while `next dev` runs (white screen; fix: kill dev,

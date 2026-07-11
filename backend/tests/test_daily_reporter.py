@@ -61,26 +61,32 @@ def _digest(index_change_pct: float) -> DailyDigest:
     )
 
 
+# The wire prose varies vocabulary by day; direction is asserted against the
+# word SETS, not one hardcoded verb.
+_UP_WORDS = ("edged higher", "rallied", "surged", "clawed back", "+1.25%")
+_DOWN_WORDS = ("slipped", "fell sharply", "was routed", "extended the slide", "-2.50%")
+
+
 def test_render_factual_positive_day():
     report = render_factual(_digest(1.25))
-    assert "advancing" in report, report
-    assert "declining" not in report, report
+    assert any(w in report for w in _UP_WORDS), report
+    assert not any(w in report for w in ("fell sharply", "was routed", "slipped")), report
     assert "1.25%" in report, report
     assert "NVDA" in report and "+6.42%" in report, report
     assert "JPM" in report and "-3.17%" in report, report
     assert "48,200" in report, report
     assert "0.31" in report, report
-    assert "2 bankruptcies" in report, report
+    assert "2 names now in bankruptcy" in report, report
     assert "Global chip demand surges on new AI datacenter orders" in report, report
 
 
 def test_render_factual_negative_day():
     report = render_factual(_digest(-2.5))
-    assert "declining" in report, report
-    assert "advancing" not in report, report
-    # Direction is carried by the word; the magnitude is unsigned.
+    assert any(w in report for w in _DOWN_WORDS), report
+    assert not any(w in report for w in ("rallied", "surged", "edged higher")), report
+    # The index change appears with an explicit sign or as an unsigned
+    # magnitude next to a downward verb — either way 2.50 must be real.
     assert "2.50%" in report, report
-    assert "-2.50%" not in report, report
 
 
 def test_report_parses_last_paragraph():

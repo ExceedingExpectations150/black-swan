@@ -180,3 +180,97 @@ class MacroAnalyst:
         )
         raw: str = await self.router.prompt_cohort(session, prompt)
         return _extract_last_paragraph(raw)
+
+
+# --------------------------------------------------------------------------
+# DailyReporter — end-of-day wire report from a quantitative digest
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DailyDigest:
+    """Quantitative end-of-day rollup; the caller (tick engine) builds it."""
+
+    day_index: int
+    tick_id: int
+    index_change_pct: float
+    top_gainer_ticker: str
+    top_gainer_pct: float
+    top_loser_ticker: str
+    top_loser_pct: float
+    total_volume: int
+    stress_index: float
+    bankrupt_count: int
+    headline: str
+
+
+def render_factual(digest: DailyDigest) -> str:
+    """Deterministic end-of-day report — the LLM-down path.
+
+    Interpolates only the digest's real numbers; the direction word follows
+    the sign of index_change_pct. Never invents data.
+    """
+    if digest.index_change_pct > 0:
+        opener = (
+            f"Day {digest.day_index} (tick {digest.tick_id}) ended with the market "
+            f"index advancing {abs(digest.index_change_pct):.2f}%."
+        )
+    elif digest.index_change_pct < 0:
+        opener = (
+            f"Day {digest.day_index} (tick {digest.tick_id}) ended with the market "
+            f"index declining {abs(digest.index_change_pct):.2f}%."
+        )
+    else:
+        opener = (
+            f"Day {digest.day_index} (tick {digest.tick_id}) ended with the market "
+            f"index finishing flat at 0.00%."
+        )
+    movers = (
+        f"{digest.top_gainer_ticker} led gainers at {digest.top_gainer_pct:+.2f}%, "
+        f"while {digest.top_loser_ticker} was the session's worst performer at "
+        f"{digest.top_loser_pct:+.2f}%."
+    )
+    tape = (
+        f"Total volume reached {digest.total_volume:,} shares, with the system "
+        f"stress index at {digest.stress_index:.2f} and {digest.bankrupt_count} "
+        f"bankruptcies on record."
+    )
+    sentences = [opener, movers, tape]
+    if digest.headline:
+        sentences.append(f'The day\'s driving headline: "{digest.headline}".')
+    return " ".join(sentences)
+
+
+class DailyReporter:
+    """Financial wire-service reporter writing the end-of-day market report.
+
+    Raises RuntimeError only when the router does; the caller falls back to
+    render_factual(digest) — this class never synthesizes a report itself.
+    """
+
+    def __init__(self, router: GeminiModelRouter) -> None:
+        self.router = router
+
+    def _build_prompt(self, digest: DailyDigest) -> str:
+        return (
+            "You are a financial wire-service reporter (Reuters/Bloomberg style) "
+            "writing the end-of-day market report for a simulated exchange.\n\n"
+            "Today's verified closing numbers — the ONLY figures that exist:\n"
+            f"- Trading day: {digest.day_index} (tick {digest.tick_id})\n"
+            f"- Market index change: {digest.index_change_pct:+.2f}%\n"
+            f"- Top gainer: {digest.top_gainer_ticker} ({digest.top_gainer_pct:+.2f}%)\n"
+            f"- Top loser: {digest.top_loser_ticker} ({digest.top_loser_pct:+.2f}%)\n"
+            f"- Total volume: {digest.total_volume:,} shares\n"
+            f"- System stress index: {digest.stress_index:.2f}\n"
+            f"- Bankruptcies on record: {digest.bankrupt_count}\n"
+            f"- Driving headline: {digest.headline}\n\n"
+            "Write a 3-5 sentence end-of-day market report grounded ONLY in the "
+            "numbers above. Do NOT invent any figure, ticker, or statistic that "
+            "is not listed. Output plain text as a single paragraph: no markdown, "
+            "no headings, no bullet points, no preamble."
+        )
+
+    async def report(self, http: aiohttp.ClientSession, digest: DailyDigest) -> str:
+        """One router call; returns the report paragraph (may be empty)."""
+        raw: str = await self.router.prompt_cohort(http, self._build_prompt(digest))
+        return _extract_last_paragraph(raw)

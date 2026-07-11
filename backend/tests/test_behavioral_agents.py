@@ -73,7 +73,7 @@ def test_orders_flow_and_market_clears():
     companies = _companies()
     orders = build_behavioral_orders(
         1, cohorts, companies, _holdings(cohorts, companies),
-        _histories(companies), event_active=False, decided_agent_ids=set(),
+        _histories(companies), event_intensity=0.0, decided_agent_ids=set(),
     )
     assert len(orders) > 50, f"expected an active market, got {len(orders)} orders"
     buys = sum(1 for o in orders if o.order_type == OrderType.BUY)
@@ -93,19 +93,19 @@ def test_black_swan_moves_prices_through_beliefs():
     cohorts = _cohorts(150)
     engine = MatchingEngine()
 
-    def clearing(event_active: bool, tick: int) -> float:
+    def clearing(intensity: float, tick: int) -> float:
         companies = _companies()
         orders = build_behavioral_orders(
             tick, cohorts, companies, _holdings(cohorts, companies),
-            _histories(companies), event_active=event_active, decided_agent_ids=set(),
+            _histories(companies), event_intensity=intensity, decided_agent_ids=set(),
         )
         book = [o for o in orders if o.ticker == "AAPL"]
         price, _, volume = engine.resolve_order_book(book, 230.0)
         assert volume > 0
         return price
 
-    calm = sum(clearing(False, t) for t in range(1, 6)) / 5
-    panic = sum(clearing(True, t) for t in range(1, 6)) / 5
+    calm = sum(clearing(0.0, t) for t in range(1, 6)) / 5
+    panic = sum(clearing(1.0, t) for t in range(1, 6)) / 5
     assert panic < calm, f"fear must push prices down via order flow: calm={calm} panic={panic}"
 
 
@@ -115,7 +115,7 @@ def test_llm_decided_cohorts_are_skipped():
     decided = {a.agent_id for a in cohorts[:10]}
     orders = build_behavioral_orders(
         1, cohorts, companies, _holdings(cohorts, companies),
-        _histories(companies), event_active=False, decided_agent_ids=decided,
+        _histories(companies), event_intensity=0.0, decided_agent_ids=decided,
     )
     assert all(o.agent_id not in decided for o in orders)
 

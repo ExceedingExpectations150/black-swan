@@ -143,6 +143,11 @@ class TimesFMForecaster:
     HORIZON_LEN: Final[int] = 32
     MIN_CONTEXT: Final[int] = 32
     CHECKPOINT_REPO: Final[str] = "google/timesfm-2.5-200m-pytorch"
+    # Micro-batch size: the whole market (~50 tickers) is forecast in ONE
+    # batched call per refresh. per_core_batch_size=1 forced ~50 sequential
+    # forward passes (~30 s on CPU); batching brings a refresh down to a few
+    # seconds. Sized above the company count with headroom.
+    BATCH_SIZE: Final[int] = 64
 
     def __init__(self) -> None:
         # Imported here, not at module top, so the Gemma cohort layer stays
@@ -162,7 +167,7 @@ class TimesFMForecaster:
                 max_context=self.CONTEXT_LEN,
                 max_horizon=self.HORIZON_LEN,
                 normalize_inputs=True,
-                per_core_batch_size=1,
+                per_core_batch_size=self.BATCH_SIZE,
                 infer_is_positive=True,
                 fix_quantile_crossing=True,
             )
@@ -178,10 +183,31 @@ class TimesFMForecaster:
         if not price_history:
             raise ValueError("price_history must contain at least one clearing price.")
 
+        return self.forecast_batch({"_": price_history})["_"]
+
+    def _to_context(self, price_history: list[float]) -> np.ndarray:
+        """Last CONTEXT_LEN prices, left-padded to MIN_CONTEXT (PRD rule 4.3)."""
         window: list[float] = price_history[-self.CONTEXT_LEN :]
         if len(window) < self.MIN_CONTEXT:
             window = [window[0]] * (self.MIN_CONTEXT - len(window)) + window
+        return np.asarray(window, dtype=np.float32)
 
-        context: np.ndarray = np.asarray(window, dtype=np.float32)
-        point_forecast, _ = self.tfm.forecast(horizon=self.HORIZON_LEN, inputs=[context])
-        return float(point_forecast[0][0])
+    def forecast_batch(self, histories: dict[str, list[float]]) -> dict[str, float]:
+        """Forecast the next clearing price for MANY series in ONE batched call.
+
+        The whole market is forecast per refresh; batching (with a matching
+        per_core_batch_size) turns ~50 sequential forward passes into one,
+        which is what keeps the refresh loop fast. Empty histories are
+        skipped; returns {ticker: next-tick point forecast}.
+        """
+        tickers: list[str] = []
+        contexts: list[np.ndarray] = []
+        for ticker, series in histories.items():
+            if not series:
+                continue
+            tickers.append(ticker)
+            contexts.append(self._to_context(series))
+        if not contexts:
+            return {}
+        point_forecast, _ = self.tfm.forecast(horizon=self.HORIZON_LEN, inputs=contexts)
+        return {ticker: float(point_forecast[i][0]) for i, ticker in enumerate(tickers)}

@@ -53,8 +53,10 @@ CHARTIST_SENTIMENT_WEIGHT: float = 0.6
 CHARTIST_MIN_SIGNAL: float = 0.002
 
 # An active Black Swan headline is a market-wide fear prior on top of
-# per-company sentiment. This shifts what agents BELIEVE; prices only move
-# if their resulting orders actually cross.
+# per-company sentiment, scaled by a DECAYING intensity supplied per tick by
+# the tick engine (1.0 at the shock, decaying toward a small residual). This
+# shifts what agents BELIEVE; prices only move if their resulting orders
+# actually cross. EVENT_FEAR_PRIOR is the peak magnitude at intensity 1.0.
 EVENT_FEAR_PRIOR: float = -0.35
 
 # Order sizing.
@@ -79,12 +81,13 @@ def strategy_of(agent_id: str) -> str:
     return "noise"
 
 
-def _effective_sentiment(company: Company, event_active: bool, risk: float) -> float:
+def _effective_sentiment(company: Company, event_intensity: float, risk: float) -> float:
     """The agent's belief about a company: news sentiment plus event fear.
 
-    Cautious agents (low risk tolerance) feel the fear prior more strongly.
+    `event_intensity` is 0.0 with no event, 1.0 at the shock, decaying in
+    between. Cautious agents (low risk tolerance) feel the fear more strongly.
     """
-    fear = EVENT_FEAR_PRIOR * (1.5 - risk) if event_active else 0.0
+    fear = EVENT_FEAR_PRIOR * event_intensity * (1.5 - risk)
     return max(-1.0, min(1.0, company.sentiment + fear))
 
 
@@ -109,7 +112,7 @@ def build_behavioral_orders(
     companies: list[Company],
     holdings: dict[str, dict[str, int]],
     histories: dict[str, list[float]],
-    event_active: bool,
+    event_intensity: float,
     decided_agent_ids: set[str],
 ) -> list[OrderBook]:
     """Real limit orders for every cohort the LLM swarm did not decide for."""
@@ -144,7 +147,7 @@ def build_behavioral_orders(
 
         for company in watched:
             price = company.current_price
-            belief = _effective_sentiment(company, event_active, risk)
+            belief = _effective_sentiment(company, event_intensity, risk)
 
             if strategy == "fundamentalist":
                 fair = company.anchor_price * (1.0 + FUND_SENTIMENT_WEIGHT * belief)

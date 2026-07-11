@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import uuid
@@ -33,12 +34,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ai_clients import GeminiModelRouter, TimesFMForecaster
 from behavioral_agents import build_behavioral_orders
 from database import SessionLocal
+from event_analyst import EventImpactAnalyst
 from economy import compute_economy_snapshot, persist_economy_snapshot
 from matching_engine import ClearedTransaction, MatchingEngine
 from models import (
@@ -55,7 +57,15 @@ from models import (
     SocialPost,
     WorldState,
 )
-from social_agents import CompanyPRContext, NewsPublisher, MacroAnalyst, PostDraft
+from social_agents import (
+    CompanyPRContext,
+    DailyDigest,
+    DailyReporter,
+    MacroAnalyst,
+    NewsPublisher,
+    PostDraft,
+    render_factual,
+)
 
 logger = logging.getLogger("chaosnet.tick")
 
@@ -65,8 +75,10 @@ logger = logging.getLogger("chaosnet.tick")
 # tick. Tune via BLACKSWAN_SWARM_BATCH alongside BLACKSWAN_RETAIL_COHORTS.
 COHORT_BATCH_SIZE: int = max(1, int(os.getenv("BLACKSWAN_SWARM_BATCH", "50")))
 RETAIL_MAX_ORDER_FRACTION: float = 0.80
-INSTITUTIONAL_CASH_FRACTION_PER_TICKER: float = 0.05
-INSTITUTIONAL_INVENTORY_FRACTION: float = 0.15
+# Calibrated for the conviction ladder below (larger fractions oversize the
+# quant flow once five funds ladder their limits across the gap).
+INSTITUTIONAL_CASH_FRACTION_PER_TICKER: float = 0.02
+INSTITUTIONAL_INVENTORY_FRACTION: float = 0.05
 SOCIAL_DIGEST_POSTS: int = 8
 SENTIMENT_CARRYOVER: float = 0.7
 ANALYST_EVERY_N_TICKS: int = 5
@@ -81,8 +93,36 @@ IMBALANCE_PRESSURE: float = 0.25
 # movement now comes from real order flow: heuristic behavioral cohorts
 # (behavioral_agents.py), LLM swarm cohorts when quota allows, and TimesFM
 # institutional funds — matched in the CDA. The Black Swan event impacts
-# prices only through agent beliefs (sentiment + fear prior), never through
-# a multiplier on the clearing price.
+# prices only through agent beliefs (sentiment + fear) and repriced
+# fundamentals (event analyst -> conditioned forecasts), never through a
+# multiplier on the clearing price.
+#
+# Black Swan transmission. An active event is NOT applied to the price; it is
+# applied to agent DECISIONS. EVENT_FEAR_INTENSITY feeds the behavioral
+# crowd's fear term (-> sell tilt); EVENT_SENTIMENT_HIT drives a per-tick
+# negative sentiment impulse (bad news) that the crowd and the economy panel
+# both read. The crash then emerges from the resulting order flow.
+EVENT_FEAR_INTENSITY: float = 1.0
+EVENT_SENTIMENT_HIT: float = 0.03
+EVENT_SENTIMENT_DECAY: float = 0.9
+# A Black Swan's panic is an IMPULSE that fades, not a permanent force.
+# Without decay the crowd sells every tick forever and the market spirals to
+# ~zero. Fear decays from the full hit toward a small residual over
+# EVENT_DECAY_TICKS, so the market drops sharply, finds a floor near the
+# impaired fundamental, and can recover — while the (persistent) analyst
+# impact on the forecast keeps fundamentals repriced.
+EVENT_DECAY_TICKS: float = 12.0
+EVENT_RESIDUAL_FRAC: float = 0.15
+# Institutional (TimesFM) conviction ladder: the 5 quant funds disperse their
+# limit prices between the current price and the forecast, so the smart-money
+# book actually crosses the behavioral crowd instead of stacking one-sided.
+INSTITUTIONAL_CONVICTIONS: tuple[float, ...] = (0.25, 0.5, 0.75, 1.0, 1.25)
+# Ignore forecasts within this fraction of the current price (no edge, no order).
+QUANT_DEADBAND: float = 0.001
+# Weight of the event-repriced fundamental (anchor x (1 + impact)) in the
+# quant forecast. High enough that the quant funds DEFEND that fundamental as
+# a floor instead of chasing a falling price down forever.
+FUNDAMENTAL_BLEND: float = 0.6
 
 SWARM_PROMPT_TEMPLATE: str = """You are a JSON API simulating {n} retail trading cohorts in a multi-stock market. You never explain; you only output JSON.
 
@@ -214,9 +254,24 @@ class TickEngine:
         self.session_factory = session_factory
         self.news_desk = NewsPublisher(router)
         self.analyst = MacroAnalyst(router)
+        self.daily_reporter = DailyReporter(router)
+        self.event_analyst = EventImpactAnalyst(router)
+        # Event-conditioned forecast pipeline state. The slow refresh loop
+        # REBINDS these dicts (never mutates in place) so the tick loop can
+        # snapshot them without locks.
+        self.forecast_cache: dict[str, float] = {}
+        self.event_impact: dict[str, float] = {}
+        self.event_impact_source: str = ""
+        self._analyzed_event: str = ""
+        self._event_key: str = ""
+        self._event_start_tick: int | None = None
 
     async def execute_simulation_tick(
-        self, tick_id: int, active_event: str, sim_time: datetime | None = None
+        self,
+        tick_id: int,
+        active_event: str,
+        sim_time: datetime | None = None,
+        ticks_per_day: int | None = None,
     ) -> list[dict[str, Any]]:
         """Run one tick; returns the ordered event list for /ws broadcast."""
         self._sim_time = sim_time or datetime.now(timezone.utc)
@@ -241,20 +296,27 @@ class TickEngine:
             )
             histories = self._load_price_histories(db, companies)
 
+            # Black Swan transmission (beliefs, never price): a decaying
+            # panic intensity drives both the sentiment impulse and the
+            # behavioral fear term, so the crash is an impulse that finds a
+            # floor instead of a permanent slide.
+            event_intensity = self._event_intensity(active_event, tick_id)
+            self._apply_event_sentiment(companies, event_intensity)
+
             async with aiohttp.ClientSession() as http:
-                # 3 & 4 & 5. Run News Publisher, Behavioral swarm (Gemma), 
-                # and quant funds (TimesFM) concurrently. 
-                # The swarm will react to the previous tick's feed to decouple them.
+                # 3 & 4. Run News Publisher and the behavioral swarm (Gemma)
+                # concurrently. TimesFM does NOT run in-tick: the slow refresh
+                # loop maintains forecast_cache off-thread and the tick reads
+                # a snapshot (empty until the first refresh lands — the quant
+                # funds simply sit out those first seconds).
                 news_task = self._run_news_desk(db, http, companies, active_event, tick_id)
                 swarm_task = self._run_swarm(
                     http, companies, retail, holdings, recent_posts, active_event, tick_id
                 )
-                quant_task = asyncio.to_thread(self._forecast_all, histories)
-                
-                posts, swarm_result, forecasts = await asyncio.gather(
-                    news_task, swarm_task, quant_task
-                )
+
+                posts, swarm_result = await asyncio.gather(news_task, swarm_task)
                 swarm_orders, llm_decided = swarm_result
+                forecasts = dict(self.forecast_cache)
 
                 events += [_event("social_post", tick_id, _post_payload(p)) for p in posts]
 
@@ -270,7 +332,7 @@ class TickEngine:
                     companies,
                     holdings,
                     histories,
-                    event_active=bool(active_event),
+                    event_intensity=event_intensity,
                     decided_agent_ids=decided,
                 )
                 orders = (
@@ -301,6 +363,19 @@ class TickEngine:
                     if narrative:
                         snapshot["narrative"] = narrative
                 persist_economy_snapshot(db, snapshot)
+
+                # 7b. Daily news reporter: at each simulated-day boundary,
+                # digest the day's REAL numbers and publish an end-of-day
+                # report to the feed (LLM prose, deterministic factual
+                # fallback — never invented figures).
+                if ticks_per_day and tick_id % ticks_per_day == 0:
+                    report_post = await self._publish_daily_report(
+                        db, http, tick_id, ticks_per_day, companies, snapshot, active_event
+                    )
+                    if report_post is not None:
+                        events.append(
+                            _event("social_post", tick_id, _post_payload(report_post))
+                        )
 
             events.append(
                 _event(
@@ -543,14 +618,222 @@ class TickEngine:
         return orders, decided_ids
 
     # ------------------------------------------------------------------ #
+    # Daily news reporter                                                 #
+    # ------------------------------------------------------------------ #
+
+    async def _publish_daily_report(
+        self,
+        db: Session,
+        http: aiohttp.ClientSession,
+        tick_id: int,
+        ticks_per_day: int,
+        companies: list[Company],
+        snapshot: dict[str, Any],
+        active_event: str,
+    ) -> SocialPost | None:
+        """End-of-day market report from the day's REAL numbers.
+
+        Day window is (tick_id - ticks_per_day, tick_id]. Day-open prices come
+        from the CompanySnapshot rows at the previous day boundary (anchor
+        price on day one). LLM prose via the router; on any failure the
+        deterministic factual template renders the same numbers instead.
+        """
+        day_index = tick_id // ticks_per_day
+        day_start_tick = tick_id - ticks_per_day
+
+        opens: dict[str, float] = {}
+        if day_start_tick > 0:
+            rows = db.execute(
+                select(CompanySnapshot).where(CompanySnapshot.tick_id == day_start_tick)
+            ).scalars()
+            opens = {r.ticker: r.current_price for r in rows}
+        changes: list[tuple[str, float]] = []
+        for c in companies:
+            open_price = opens.get(c.ticker) or c.anchor_price
+            if open_price and open_price > 0:
+                changes.append((c.ticker, (c.current_price - open_price) / open_price * 100.0))
+        if not changes:
+            return None
+        changes.sort(key=lambda t: t[1])
+        top_loser, top_gainer = changes[0], changes[-1]
+        index_change = sum(pct for _, pct in changes) / len(changes)
+        total_volume = int(
+            db.execute(
+                select(func.coalesce(func.sum(PriceTick.volume), 0)).where(
+                    PriceTick.tick_id > day_start_tick, PriceTick.tick_id <= tick_id
+                )
+            ).scalar_one()
+        )
+
+        digest = DailyDigest(
+            day_index=day_index,
+            tick_id=tick_id,
+            index_change_pct=round(index_change, 3),
+            top_gainer_ticker=top_gainer[0],
+            top_gainer_pct=round(top_gainer[1], 3),
+            top_loser_ticker=top_loser[0],
+            top_loser_pct=round(top_loser[1], 3),
+            total_volume=total_volume,
+            stress_index=float(snapshot.get("system_stress_index", 0.0)),
+            bankrupt_count=int(snapshot.get("bankrupt_count", 0)),
+            headline=active_event,
+        )
+        try:
+            content = await asyncio.wait_for(
+                self.daily_reporter.report(http, digest), timeout=20.0
+            )
+        except (RuntimeError, asyncio.TimeoutError) as exc:
+            logger.warning("daily reporter LLM failed (day %d): %s", day_index, exc)
+            content = render_factual(digest)
+
+        post = SocialPost(
+            post_id=str(uuid.uuid4()),
+            tick_id=tick_id,
+            author_type=AuthorType.ANALYST,
+            author_ticker=None,
+            author_display="Market Wire",
+            handle="@DailyBrief",
+            content=content,
+            sentiment=max(-1.0, min(1.0, index_change / 10.0)),
+            likes=120,
+            reposts=24,
+            ts=getattr(self, "_sim_time", None) or datetime.now(timezone.utc),
+        )
+        db.add(post)
+        return post
+
+    # ------------------------------------------------------------------ #
     # Quant funds                                                         #
     # ------------------------------------------------------------------ #
 
     def _forecast_all(self, histories: dict[str, list[float]]) -> dict[str, float]:
-        forecasts: dict[str, float] = {}
-        for ticker, series in histories.items():
-            forecasts[ticker] = self.forecaster.forecast_next_tick(series)
-        return forecasts
+        """One batched TimesFM pass (kept for tests and the refresh path)."""
+        return self.forecaster.forecast_batch(histories)
+
+    def refresh_forecasts(self) -> None:
+        """Recompute the event-conditioned forecast (read-only, off-thread).
+
+        Called by the controller in a worker thread every few seconds. Runs one
+        batched TimesFM forecast, then conditions each ticker on the analyst's
+        event impact so the quant funds trade a prediction that accounts for
+        the Black Swan. Never writes the DB, so it can't contend with the tick
+        loop's single-writer session.
+        """
+        with self.session_factory() as db:
+            companies = list(
+                db.execute(select(Company).where(Company.is_bankrupt.is_(False))).scalars()
+            )
+            histories = self._load_price_histories(db, companies)
+        raw = self.forecaster.forecast_batch(histories)
+        anchors = {c.ticker: c.anchor_price for c in companies}
+        self.forecast_cache = self._condition_forecast(raw, anchors, self.event_impact)
+
+    @staticmethod
+    def _condition_forecast(
+        raw: dict[str, float], anchors: dict[str, float], impact: dict[str, float]
+    ) -> dict[str, float]:
+        """Blend the trailing TimesFM forecast with the event-repriced fundamental.
+
+        For a name the analyst flagged, fair value is anchor x (1 + impact) — a
+        FIXED repriced level the quant funds trade toward. Blending it in
+        (rather than haircutting the trailing forecast, which just chases a
+        falling price down) gives the market a floor at the justified
+        fundamental instead of a bottomless slide to zero.
+        """
+        conditioned: dict[str, float] = {}
+        for ticker, raw_val in raw.items():
+            imp = impact.get(ticker, 0.0)
+            if imp and ticker in anchors:
+                fundamental = anchors[ticker] * (1.0 + imp)
+                conditioned[ticker] = (
+                    FUNDAMENTAL_BLEND * fundamental + (1.0 - FUNDAMENTAL_BLEND) * raw_val
+                )
+            else:
+                conditioned[ticker] = raw_val
+        return conditioned
+
+    def reset_ai_state(self) -> None:
+        """Clear cached forecasts and event analysis (used on world reset)."""
+        self.forecast_cache = {}
+        self.event_impact = {}
+        self.event_impact_source = ""
+        self._analyzed_event = ""
+        self._event_key = ""
+        self._event_start_tick = None
+
+    async def refresh_event_impact(self, active_event: str) -> None:
+        """Update the per-ticker event impact when the active event changes.
+
+        Runs the LLM analyst agent (with a keyword fallback) once per distinct
+        event, mapping its per-sector verdict onto every company. Best-effort:
+        a failure leaves the last impact in place. Clearing the event clears
+        the impact, so the quant forecast reverts to pure TimesFM (recovery).
+        """
+        event = active_event.strip()
+        if event == self._analyzed_event:
+            return
+        if not event:
+            self.event_impact = {}
+            self.event_impact_source = ""
+            self._analyzed_event = ""
+            return
+        with self.session_factory() as db:
+            companies = list(db.execute(select(Company)).scalars())
+        sectors = sorted({c.sector for c in companies})
+        try:
+            async with aiohttp.ClientSession() as http:
+                sector_impact, source = await self.event_analyst.analyze(http, event, sectors)
+        except Exception as exc:  # never let analysis crash the refresh loop
+            logger.warning("event analyst failed for %r: %s", event, exc)
+            return
+        self.event_impact = {
+            c.ticker: sector_impact.get(c.sector, 0.0) for c in companies
+        }
+        self.event_impact_source = source
+        self._analyzed_event = event
+        logger.info(
+            "event impact (%s) for %r across %d sectors", source, event, len(sector_impact)
+        )
+
+    def _event_intensity(self, active_event: str, tick_id: int) -> float:
+        """Decaying panic intensity for the active event (0.0 when none).
+
+        Peaks at EVENT_FEAR_INTENSITY when the event first hits, then decays
+        toward a small residual over EVENT_DECAY_TICKS. This is what makes the
+        crash an impulse that stabilizes instead of a permanent slide to zero.
+        """
+        event = active_event.strip()
+        if not event:
+            self._event_key = ""
+            self._event_start_tick = None
+            return 0.0
+        if event != self._event_key:
+            self._event_key = event
+            self._event_start_tick = tick_id
+        start = self._event_start_tick if self._event_start_tick is not None else tick_id
+        elapsed = max(0, tick_id - start)
+        decay = EVENT_RESIDUAL_FRAC + (1.0 - EVENT_RESIDUAL_FRAC) * math.exp(
+            -elapsed / EVENT_DECAY_TICKS
+        )
+        return EVENT_FEAR_INTENSITY * decay
+
+    @staticmethod
+    def _apply_event_sentiment(companies: list[Company], intensity: float) -> None:
+        """Transmit an active Black Swan as a negative sentiment impulse.
+
+        This does NOT move price — it moves crowd sentiment (bad news), which
+        the behavioral engine then trades on. The hit is heterogeneous per
+        company (seeded from the ticker) and scaled by the decaying panic
+        `intensity`, so as the shock fades sentiment mean-reverts toward zero.
+        """
+        if intensity <= 0.0:
+            return
+        for company in companies:
+            bias = (sum(ord(ch) for ch in company.ticker) % 100) / 100.0  # 0..1
+            impulse = -EVENT_SENTIMENT_HIT * (0.5 + bias) * intensity
+            company.sentiment = max(
+                -1.0, min(1.0, company.sentiment * EVENT_SENTIMENT_DECAY + impulse)
+            )
 
     def _build_institutional_orders(
         self,
@@ -560,23 +843,41 @@ class TickEngine:
         forecasts: dict[str, float],
         companies: list[Company],
     ) -> list[OrderBook]:
+        """TimesFM quant funds as dispersed liquidity providers.
+
+        Each of the 5 funds treats its forecast as fair value and posts a
+        limit order PARTWAY there (scaled by its conviction on the ladder), so
+        the smart-money book spans the current-price -> forecast range and
+        actually crosses the behavioral crowd instead of stacking one-sided.
+        When panic drops the price below the forecast the funds BUY the dip;
+        when it runs above, they SELL — real, model-driven price discovery.
+        """
         orders: list[OrderBook] = []
         by_ticker = {c.ticker: c for c in companies}
-        for agent in institutional:
+        for i, agent in enumerate(institutional):
+            conviction = INSTITUTIONAL_CONVICTIONS[i % len(INSTITUTIONAL_CONVICTIONS)]
             for ticker, prediction in forecasts.items():
                 company = by_ticker.get(ticker)
-                if company is None:
+                if company is None or company.current_price <= 0:
                     continue
-                if prediction > company.current_price:
-                    qty = int(
-                        agent.cash_balance * INSTITUTIONAL_CASH_FRACTION_PER_TICKER / prediction
-                    )
+                gap = (prediction - company.current_price) / company.current_price
+                if abs(gap) < QUANT_DEADBAND:
+                    continue
+                limit_price = round(
+                    max(0.01, company.current_price * (1.0 + gap * conviction)), 2
+                )
+                if gap > 0:
                     side = OrderType.BUY
-                else:
                     qty = int(
-                        holdings[agent.agent_id].get(ticker, 0) * INSTITUTIONAL_INVENTORY_FRACTION
+                        agent.cash_balance
+                        * INSTITUTIONAL_CASH_FRACTION_PER_TICKER
+                        * conviction
+                        / limit_price
                     )
+                else:
                     side = OrderType.SELL
+                    held = holdings.get(agent.agent_id, {}).get(ticker, 0)
+                    qty = int(held * INSTITUTIONAL_INVENTORY_FRACTION * (0.5 + conviction))
                 if qty <= 0:
                     continue
                 orders.append(
@@ -587,7 +888,7 @@ class TickEngine:
                         ticker=ticker,
                         order_type=side,
                         quantity=qty,
-                        limit_price=float(prediction),
+                        limit_price=limit_price,
                         status=OrderStatus.PENDING,
                     )
                 )

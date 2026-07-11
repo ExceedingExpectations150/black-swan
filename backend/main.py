@@ -20,6 +20,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 
+import aiohttp
+
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -28,10 +30,23 @@ from sqlalchemy import func, select
 from database import SessionLocal, init_db, seed_initial_market_state, Base, engine
 from economy import compute_economy_snapshot, snapshot_from_row
 from models import Company, EconomySnapshot, PriceTick, SocialPost, WorldState, CompanySnapshot
+from trader_agent import (
+    ChatMessage,
+    SeniorTraderAgent,
+    build_market_brief,
+    compute_ticker_stats,
+    render_offline_brief,
+)
 
 logger = logging.getLogger("chaosnet.main")
 
 TICK_INTERVAL_SECONDS: float = 3.0
+# Cadence of the slow AI-refresh loop (event analyst + batched TimesFM).
+FORECAST_REFRESH_SECONDS: float = 8.0
+# Defaults for a bare POST /api/start (no payload): a bounded, well-formed
+# run rather than an unbounded 1-tick/day drift.
+DEFAULT_DURATION_DAYS: int = 30
+DEFAULT_TICKS_PER_DAY: int = 4
 
 
 def _epoch(dt: datetime) -> int:
@@ -125,6 +140,8 @@ class SimulationController:
         self.manager = ConnectionManager()
         self.tick_engine: Any = None
         self.task: asyncio.Task[None] | None = None
+        self.forecast_task: asyncio.Task[None] | None = None
+        self.chat_router: Any = None  # lazy, independent of /api/start
         self.active_event: str = ""
         self.next_tick_id: int = 1
         self.tick_interval_seconds: float = TICK_INTERVAL_SECONDS
@@ -240,6 +257,7 @@ class SimulationController:
                     self.next_tick_id,
                     self.active_event,
                     sim_time=self.sim_time_for(self.next_tick_id),
+                    ticks_per_day=self.ticks_per_day,
                 )
                 self.next_tick_id += 1
                 for event in events:
@@ -258,6 +276,38 @@ class SimulationController:
                 }
             )
 
+    async def forecast_refresh_loop(self) -> None:
+        """Slow AI loop: event analyst + batched TimesFM, off the tick path.
+
+        Keeps `tick_engine.forecast_cache` fresh (event-conditioned) so the
+        fast tick loop only ever snapshots a dict. Errors are logged and
+        retried next cycle; they never take down the simulation.
+        """
+        try:
+            while True:
+                engine_ref = self.tick_engine
+                if engine_ref is not None:
+                    try:
+                        await engine_ref.refresh_event_impact(self.active_event)
+                        await asyncio.to_thread(engine_ref.refresh_forecasts)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning("forecast refresh failed: %s", exc)
+                await asyncio.sleep(FORECAST_REFRESH_SECONDS)
+        except asyncio.CancelledError:
+            raise
+
+    async def stop_ai_tasks(self) -> None:
+        """Cancel the tick and refresh loops (idempotent)."""
+        for attr in ("task", "forecast_task"):
+            t: asyncio.Task[None] | None = getattr(self, attr)
+            if t is not None:
+                t.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await t
+                setattr(self, attr, None)
+
 
 controller = SimulationController()
 
@@ -273,8 +323,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("Seeded %d agents into an empty market.", created)
     controller.load_tick_counter()
     yield
-    if controller.is_running and controller.task is not None:
-        controller.task.cancel()
+    await controller.stop_ai_tasks()
 
 
 app = FastAPI(title="ChaosNet: Black Swan Market Twin", lifespan=lifespan)
@@ -306,7 +355,14 @@ class SpeedPayload(BaseModel):
     interval: float
 
 class DurationPayload(BaseModel):
-    ticks: int
+    days: int
+
+class ChatMessagePayload(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessagePayload]
 
 
 # --------------------------------------------------------------------- #
@@ -322,12 +378,9 @@ async def start_simulation(payload: StartPayload | None = None) -> dict[str, Any
             return {"status": "already_running", "payload": controller.get_status_payload()}
         # Paused loop (a completed run parks here, task still alive in its
         # sleep loop). Starting again means "new simulation": stop the old
-        # task so the fresh-start path below can reset the world. Resuming
+        # tasks so the fresh-start path below can reset the world. Resuming
         # a paused run is /api/resume, not /api/start.
-        controller.task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await controller.task
-        controller.task = None
+        await controller.stop_ai_tasks()
 
     # A new simulation always begins from a clean world at tick 1. If a
     # previous run left ticks behind, wipe and reseed (keeping the armed
@@ -335,6 +388,7 @@ async def start_simulation(payload: StartPayload | None = None) -> dict[str, Any
     controller.load_tick_counter()
     world_was_reset = False
     if controller.next_tick_id > 1:
+        await controller.stop_ai_tasks()  # refresh loop must not read mid-wipe
         controller.reset_world(preserve_event=True)
         world_was_reset = True
 
@@ -342,8 +396,12 @@ async def start_simulation(payload: StartPayload | None = None) -> dict[str, Any
         controller.tick_interval_seconds = payload.speed
         controller.duration_days = payload.duration_days
         controller.ticks_per_day = payload.ticks_per_day
-        controller.max_ticks = payload.duration_days * payload.ticks_per_day
-        controller.target_tick = controller.next_tick_id + controller.max_ticks - 1
+    else:
+        # Bare start: a bounded, well-formed default run.
+        controller.duration_days = controller.duration_days or DEFAULT_DURATION_DAYS
+        controller.ticks_per_day = controller.ticks_per_day or DEFAULT_TICKS_PER_DAY
+    controller.max_ticks = controller.duration_days * controller.ticks_per_day
+    controller.target_tick = controller.next_tick_id + controller.max_ticks - 1
 
     controller.sim_start = datetime.now(timezone.utc)
 
@@ -353,6 +411,8 @@ async def start_simulation(payload: StartPayload | None = None) -> dict[str, Any
         logger.exception("AI layer startup failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     controller.paused = False
+    # Refresh loop first so the forecast cache warms as early as possible.
+    controller.forecast_task = asyncio.create_task(controller.forecast_refresh_loop())
     controller.task = asyncio.create_task(controller.run_loop())
     status = controller.get_status_payload()
     if world_was_reset:
@@ -368,10 +428,7 @@ async def start_simulation(payload: StartPayload | None = None) -> dict[str, Any
 async def stop_simulation() -> dict[str, Any]:
     if not controller.is_running or controller.task is None:
         return {"status": "not_running", "payload": controller.get_status_payload()}
-    controller.task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await controller.task
-    controller.task = None
+    await controller.stop_ai_tasks()
     status = controller.get_status_payload()
     asyncio.create_task(controller.manager.broadcast({"type": "sim_status", "tick_id": controller.next_tick_id, "ts": "", "payload": status}))
     return {"status": "stopped", "payload": status}
@@ -381,17 +438,17 @@ async def stop_simulation() -> dict[str, Any]:
 async def reset_simulation() -> dict[str, Any]:
     """Wipe the entire simulation database and restart from tick 1."""
     was_running = controller.is_running
-    if was_running and controller.task is not None:
-        controller.task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await controller.task
-        controller.task = None
+    # Both loops must stop BEFORE the wipe — the refresh worker thread must
+    # not read tables while they drop. reset_world() nulls tick_engine,
+    # which destroys the forecast/event caches with it.
+    await controller.stop_ai_tasks()
 
     controller.reset_world(preserve_event=False)
 
     if was_running:
         controller.sim_start = datetime.now(timezone.utc)
         controller.build_engines()
+        controller.forecast_task = asyncio.create_task(controller.forecast_refresh_loop())
         controller.task = asyncio.create_task(controller.run_loop())
 
     status = controller.get_status_payload()
@@ -408,6 +465,12 @@ async def reset_simulation() -> dict[str, Any]:
 async def inject_event(payload: EventPayload) -> dict[str, Any]:
     """Set the active Black Swan headline fed into every cohort prompt."""
     controller.active_event = payload.headline.strip()
+    # Kick the analyst immediately so the per-sector impact lands now
+    # instead of waiting for the next refresh cycle.
+    if controller.tick_engine is not None:
+        asyncio.create_task(
+            controller.tick_engine.refresh_event_impact(controller.active_event)
+        )
     return {"status": "event_set", "headline": controller.active_event}
 
 @app.post("/api/pause")
@@ -438,12 +501,17 @@ async def set_speed(payload: SpeedPayload) -> dict[str, Any]:
 
 @app.post("/api/duration")
 async def set_duration(payload: DurationPayload) -> dict[str, Any]:
-    if payload.ticks <= 0:
+    """Adjust the run length in simulated DAYS (converted via ticks_per_day)."""
+    if controller.ticks_per_day is None:
+        raise HTTPException(status_code=400, detail="Configure a run via /api/start first.")
+    if payload.days <= 0:
         controller.target_tick = None
         controller.max_ticks = None
+        controller.duration_days = None
     else:
-        controller.target_tick = controller.next_tick_id + payload.ticks
-        controller.max_ticks = controller.next_tick_id + payload.ticks - 1
+        controller.duration_days = payload.days
+        controller.max_ticks = payload.days * controller.ticks_per_day
+        controller.target_tick = controller.max_ticks
     status = controller.get_status_payload()
     asyncio.create_task(controller.manager.broadcast({"type": "sim_status", "tick_id": controller.next_tick_id, "ts": "", "payload": status}))
     return status
@@ -609,6 +677,68 @@ async def get_social(limit: int = 50, ticker: str | None = None) -> dict[str, An
 async def get_economy() -> dict[str, Any]:
     with SessionLocal() as db:
         return _latest_economy(db)
+
+
+@app.post("/api/chat")
+async def chat_with_desk(payload: ChatRequest) -> dict[str, Any]:
+    """Senior-trader desk chat, grounded in the live market's real numbers.
+
+    Works with or without a running simulation and with or without LLM
+    quota: the statistical brief (momentum, volatility, forecast deltas) is
+    always computed from real data, and if the desk model is unreachable the
+    reply IS that brief — never fabricated prose.
+    """
+    if not payload.messages or payload.messages[-1].role != "user":
+        raise HTTPException(status_code=400, detail="messages must end with a user turn")
+
+    with SessionLocal() as db:
+        companies = list(
+            db.execute(select(Company).where(Company.is_bankrupt.is_(False))).scalars()
+        )
+        info = {
+            c.ticker: {"current_price": c.current_price, "anchor_price": c.anchor_price}
+            for c in companies
+        }
+        histories: dict[str, list[float]] = {c.ticker: [] for c in companies}
+        rows = db.execute(
+            select(PriceTick.ticker, PriceTick.price)
+            .order_by(PriceTick.tick_id.desc())
+            .limit(60 * max(1, len(companies)))
+        ).all()
+        for ticker, price in reversed(rows):
+            series = histories.get(ticker)
+            if series is not None:
+                series.append(price)
+        econ = db.execute(
+            select(EconomySnapshot).order_by(EconomySnapshot.tick_id.desc()).limit(1)
+        ).scalar_one_or_none()
+
+    stress = econ.system_stress_index if econ else 0.0
+    bankrupt = econ.bankrupt_count if econ else 0
+    forecasts = dict(controller.tick_engine.forecast_cache) if controller.tick_engine else {}
+    stats = compute_ticker_stats(histories, info, forecasts)
+    brief = build_market_brief(stats, stress, bankrupt)
+
+    # Lazy router: reuse the engine's when a run is live, otherwise build a
+    # standalone one; if keys are missing, fall back to the offline brief.
+    if controller.chat_router is None:
+        if controller.tick_engine is not None:
+            controller.chat_router = controller.tick_engine.router
+        else:
+            try:
+                from ai_clients import GeminiModelRouter
+
+                controller.chat_router = GeminiModelRouter()
+            except Exception as exc:
+                logger.warning("chat router unavailable: %s", exc)
+    if controller.chat_router is None:
+        return {"reply": render_offline_brief(brief), "source": "offline"}
+
+    desk = SeniorTraderAgent(controller.chat_router)
+    messages = [ChatMessage(role=m.role, content=m.content) for m in payload.messages]
+    async with aiohttp.ClientSession() as http:
+        reply, source = await desk.answer(http, messages, brief)
+    return {"reply": reply, "source": source}
 
 
 @app.get("/api/indices")

@@ -110,7 +110,7 @@ function MainContent({ nav }: { nav: NavKey }) {
         <WorldMap />
       </div>
       {!mapFocus && (
-        <div className="grid h-[240px] shrink-0 grid-cols-3 gap-3">
+        <div className="grid h-[240px] shrink-0 grid-cols-3 grid-rows-[minmax(0,1fr)] gap-3">
           <MarketOverview />
           <TopMovers />
           <NewsFeed />

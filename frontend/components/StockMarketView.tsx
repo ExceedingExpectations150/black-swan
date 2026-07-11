@@ -144,7 +144,7 @@ export default function StockMarketView() {
       },
       rightPriceScale: {
         borderColor: "rgba(255,255,255,0.08)",
-        scaleMargins: { top: 0.06, bottom: 0.26 },
+        scaleMargins: { top: 0.04, bottom: 0.18 },
       },
       timeScale: {
         borderColor: "rgba(255,255,255,0.08)",
@@ -172,7 +172,7 @@ export default function StockMarketView() {
       priceScaleId: "vol",
       color: VOL_UP,
     });
-    chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.78, bottom: 0 } });
+    chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.86, bottom: 0 } });
 
     const candle = chart.addSeries(CandlestickSeries, {
       upColor: UP,
@@ -239,7 +239,7 @@ export default function StockMarketView() {
       const ts = chartRef.current.timeScale();
       const paneWidth = (containerRef.current?.clientWidth ?? 0) - 70; // price scale
       const expected = Math.max(durationDays ?? 30, bucketed.candles.length + 2);
-      const spacing = Math.min(24, Math.max(6, Math.floor(paneWidth / expected)));
+      const spacing = Math.min(12, Math.max(6, Math.floor(paneWidth / expected)));
       ts.applyOptions({ barSpacing: spacing });
       const capacity = Math.max(10, Math.floor(paneWidth / spacing));
       if (bucketed.candles.length <= capacity) {
@@ -258,14 +258,14 @@ export default function StockMarketView() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="mb-3 flex items-center gap-2 overflow-x-auto scroll-thin pb-1">
+      <div className="mb-2 flex items-center gap-1.5 overflow-x-auto scroll-thin pb-1">
         {companies.map((c) => {
           const on = c.ticker === activeTicker;
           return (
             <button
               key={c.ticker}
               onClick={() => setActiveTicker(c.ticker)}
-              className={`shrink-0 rounded-md border px-2.5 py-1 text-xs transition ${
+              className={`shrink-0 rounded-sm border px-2 py-0.5 text-[11px] transition ${
                 on
                   ? "border-white/25 bg-white/10 text-ink"
                   : "border-hair text-ink2 hover:bg-white/[0.04] hover:text-ink"
@@ -278,7 +278,7 @@ export default function StockMarketView() {
       </div>
 
       {company && (
-        <div className="mb-2 flex items-baseline gap-3 px-0.5">
+        <div className="mb-1.5 flex items-baseline gap-3 px-0.5">
           <span className="font-display text-lg font-semibold text-ink">{company.name}</span>
           <span className="tnum text-2xl font-semibold text-ink">
             {fmtPrice(company.current_price)}

@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 *.db
 .env
+
+# machine-local skill symlinks (Claude Code); real skills live in .agents/skills
+.claude/

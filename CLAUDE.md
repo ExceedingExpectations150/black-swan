@@ -41,3 +41,9 @@ You are co-working this repo with OpenAI Codex. Coordinate through
    with a matching `RELEASES` line when done.
 5. Keep messages short and factual: what changed, what you need, what is
    blocked. Reference commits by hash.
+
+For synchronous collaboration (delegating a task to Codex mid-session and
+reading its answer immediately), use the project-local `codex` skill at
+`.agents/skills/codex/SKILL.md` — it wraps `codex exec` with the right
+sandbox and resume flags. Use the bridge inboxes for asynchronous,
+cross-session coordination.

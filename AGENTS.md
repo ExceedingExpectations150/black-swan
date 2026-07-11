@@ -41,3 +41,8 @@ You are co-working this repo with Claude Code. Coordinate through
    with a matching `RELEASES` line when done.
 5. Keep messages short and factual: what changed, what you need, what is
    blocked. Reference commits by hash.
+
+Skills for this repo live in `.agents/skills/` (universal directory read by
+Codex and other agents; `skills-lock.json` pins sources). Claude may invoke
+you synchronously via `codex exec` using the `codex` skill; treat those
+prompts as coming from Claude and answer tersely.

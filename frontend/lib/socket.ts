@@ -21,8 +21,17 @@ const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8000/ws";
 const INDICES_POLL_MS = 25_000;
 const RECONNECT_MAX_MS = 15_000;
 
+/** Envelope ts carries SIMULATED time (ISO) — convert to epoch seconds. */
+function envEpoch(env: Envelope): number | undefined {
+  if (!env.ts) return undefined;
+  const ms = Date.parse(env.ts);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined;
+}
+
 function dispatch(env: Envelope): void {
   const s = useStore.getState();
+  const simEpoch = envEpoch(env);
+  if (simEpoch !== undefined) s.setSimTime(simEpoch);
   switch (env.type) {
     case "tick_start":
       s.setLatestTick(env.tick_id);
@@ -31,7 +40,7 @@ function dispatch(env: Envelope): void {
       s.setNews((env.payload as { headline: string }).headline);
       break;
     case "price_update":
-      s.applyPriceUpdate((env.payload as PriceUpdatePayload).prices, env.tick_id);
+      s.applyPriceUpdate((env.payload as PriceUpdatePayload).prices, env.tick_id, simEpoch);
       break;
     case "company_update":
       s.applyCompanyUpdate((env.payload as CompanyUpdatePayload).companies);
@@ -55,8 +64,11 @@ function dispatch(env: Envelope): void {
       break;
     }
     case "reset":
-      // Hard refresh to fully clear frontend state safely
-      window.location.reload();
+      // Soft reset: the backend wiped the world (new run). Clear per-run
+      // state and re-hydrate — no page reload, so a client still on the
+      // boot terminal isn't yanked back to the start of the boot sequence.
+      s.resetWorld();
+      void hydrate();
       break;
     case "tick_end":
     default:

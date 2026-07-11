@@ -46,6 +46,8 @@ interface StoreState {
   ticksPerDay: number | null;
   /** True once the boot terminal armed the event and started the run itself. */
   bootLaunched: boolean;
+  /** Current simulated time (epoch seconds) — advances with the sim clock. */
+  simTime: number | null;
 
   // actions
   hydrate: (snapshot: StateSnapshot) => void;
@@ -56,6 +58,7 @@ interface StoreState {
   applyPriceUpdate: (
     prices: { ticker: string; price: number; change_pct: number; volume: number }[],
     tickId: number,
+    tsEpoch?: number,
   ) => void;
   applyCompanyUpdate: (
     updates: {
@@ -77,6 +80,10 @@ interface StoreState {
   clearHistory: () => void;
   setSimStatus: (paused: boolean, tickInterval: number, isPausing?: boolean, maxTicks?: number | null, durationDays?: number | null, ticksPerDay?: number | null) => void;
   setBootLaunched: () => void;
+  setSimTime: (epochSeconds: number) => void;
+  /** Clear all per-run state after the backend wiped the world (soft reset —
+   *  no page reload, so a client sitting on the boot terminal is unaffected). */
+  resetWorld: () => void;
 }
 
 export const useStore = create<StoreState>((set) => ({
@@ -102,16 +109,40 @@ export const useStore = create<StoreState>((set) => ({
   durationDays: null,
   ticksPerDay: null,
   bootLaunched: false,
+  simTime: null,
 
   hydrate: (snapshot) =>
     set((s) => {
       const companies: Record<string, Company> = {};
       for (const c of snapshot.companies) companies[c.ticker] = c;
       const social = snapshot.social.slice(0, SOCIAL_CAP);
-      // If the backend has wiped the DB, snapshot.tick_id will be 0.
-      // We must forcefully reset the frontend's latestTickId so the setup modal appears.
+      // If the backend's world rewound (fresh DB after a wipe, or a process
+      // restart), stale per-run series from the previous world must go —
+      // otherwise charts silently merge points from two different runs.
       const isFreshDB = snapshot.tick_id === 0;
-      
+      const worldRewound = isFreshDB || snapshot.tick_id < s.latestTickId;
+      if (worldRewound) {
+        return {
+          companies,
+          social,
+          economy: snapshot.economy ?? null,
+          news: "",
+          tickId: snapshot.tick_id,
+          latestTickId: snapshot.tick_id,
+          priceSeries: {},
+          volumeSeries: {},
+          alerts: [],
+          scrubbedTickId: null,
+          simTime: null,
+          isPaused: snapshot.paused ?? false,
+          tickInterval: snapshot.tick_interval_seconds ?? s.tickInterval,
+          maxTicks: snapshot.max_ticks ?? null,
+          durationDays: snapshot.duration_days ?? null,
+          ticksPerDay: snapshot.ticks_per_day ?? null,
+          hydrated: true,
+        };
+      }
+
       return {
         companies,
         social,
@@ -139,9 +170,12 @@ export const useStore = create<StoreState>((set) => ({
         : [...s.watchlist, ticker],
     })),
 
-  applyPriceUpdate: (prices, tickId) =>
+  applyPriceUpdate: (prices, tickId, tsEpoch) =>
     set((s) => {
       if (s.scrubbedTickId !== null) return s;
+      // Series points are keyed by simulated time; fall back to the tick
+      // ordinal only if the envelope carried no usable timestamp.
+      const t = tsEpoch ?? tickId;
       const companies = { ...s.companies };
       const priceSeries = { ...s.priceSeries };
       const volumeSeries = { ...s.volumeSeries };
@@ -156,11 +190,11 @@ export const useStore = create<StoreState>((set) => ({
           };
         }
         const series = priceSeries[p.ticker] ? [...priceSeries[p.ticker]] : [];
-        series.push({ t: tickId, price: p.price, volume: p.volume });
+        series.push({ t, tick: tickId, price: p.price, volume: p.volume });
         priceSeries[p.ticker] = series.slice(-PRICE_SERIES_CAP);
 
         const vol = volumeSeries[p.ticker] ? [...volumeSeries[p.ticker]] : [];
-        vol.push({ t: tickId, v: p.volume });
+        vol.push({ t, v: p.volume });
         volumeSeries[p.ticker] = vol.slice(-PRICE_SERIES_CAP);
       }
       return { companies, priceSeries, volumeSeries, tickId };
@@ -303,6 +337,27 @@ export const useStore = create<StoreState>((set) => ({
     set({ isPaused: paused, tickInterval: interval, isPausing, maxTicks, durationDays, ticksPerDay }),
 
   setBootLaunched: () => set({ bootLaunched: true }),
+
+  setSimTime: (epochSeconds) => set({ simTime: epochSeconds }),
+
+  resetWorld: () =>
+    set({
+      priceSeries: {},
+      volumeSeries: {},
+      social: [],
+      economy: null,
+      alerts: [],
+      news: "Awaiting market open...",
+      tickId: 0,
+      latestTickId: 0,
+      scrubbedTickId: null,
+      simTime: null,
+      isPaused: false,
+      isPausing: false,
+      maxTicks: null,
+      durationDays: null,
+      ticksPerDay: null,
+    }),
 }));
 
 // Company list as a MEMOIZED hook. A raw selector returning Object.values()

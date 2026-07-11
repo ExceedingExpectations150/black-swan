@@ -7,14 +7,18 @@ engine each tick). Canonical per-tick sequence:
   1. tick_start
   2. macro news (headline passed in from the controller)
   3. Corporate PR agents post -> per-company sentiment nudges
-  4. behavioral swarm (batched Gemma calls) -> per-ticker orders
+  4. behavioral swarm (batched Gemma calls) -> per-ticker orders; cohorts the
+     LLM did not decide for trade via their heuristic strategy
+     (behavioral_agents.py: fundamentalists / chartists / noise traders)
   5. quant funds (TimesFM per ticker) -> per-ticker orders
   6. CDA match per ticker -> price_ticks, settlement, bankruptcies
   7. economy analysis (+ Macro Analyst every N ticks)
   8. return the ordered WebSocket event list for broadcast
 
-Gemma quota discipline: ONE PR-desk call + ceil(50/10) swarm calls per tick,
-all through the shared 429-rotating router. TimesFM runs locally (free).
+Prices are set exclusively by the matching engine on real order flow — no
+synthetic price shaping. Gemma quota discipline: ONE PR-desk call +
+ceil(cohorts/COHORT_BATCH_SIZE) swarm calls per tick, all through the shared
+429-rotating router. TimesFM runs locally (free).
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
+import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -33,6 +37,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ai_clients import GeminiModelRouter, TimesFMForecaster
+from behavioral_agents import build_behavioral_orders
 from database import SessionLocal
 from economy import compute_economy_snapshot, persist_economy_snapshot
 from matching_engine import ClearedTransaction, MatchingEngine
@@ -54,11 +59,11 @@ from social_agents import CompanyPRContext, NewsPublisher, MacroAnalyst, PostDra
 
 logger = logging.getLogger("chaosnet.tick")
 
-# All cohorts in ONE Gemini call per tick. Free-tier flash allows ~5
-# requests/min, so a tick's LLM footprint must stay tiny: this makes it
-# 1 PR-desk call + 1 swarm call. Flash handles all 50 cohorts in a single
-# JSON array well within the context window.
-COHORT_BATCH_SIZE: int = 50
+# Cohorts are batched per Gemini call. Free-tier flash allows ~5
+# requests/min, so a tick's LLM footprint must stay small: with the default
+# batch of 50, a 150-cohort swarm costs 3 swarm calls + 1 PR-desk call per
+# tick. Tune via BLACKSWAN_SWARM_BATCH alongside BLACKSWAN_RETAIL_COHORTS.
+COHORT_BATCH_SIZE: int = max(1, int(os.getenv("BLACKSWAN_SWARM_BATCH", "50")))
 RETAIL_MAX_ORDER_FRACTION: float = 0.80
 INSTITUTIONAL_CASH_FRACTION_PER_TICKER: float = 0.05
 INSTITUTIONAL_INVENTORY_FRACTION: float = 0.15
@@ -72,15 +77,12 @@ TIMESFM_CONTEXT: int = 512
 # Deterministic mechanics on real order flow — not a stand-in for the CDA,
 # which still sets the price whenever a trade clears.
 IMBALANCE_PRESSURE: float = 0.25
-# Event-driven macro shock. The behavioral cohorts are the intended volatility
-# source, but under exhausted LLM quota they emit nothing, leaving the market
-# inert. While a Black Swan event is active, model its market impact as a
-# deterministic per-company shock (oscillating stress + downward drift) laid
-# over the CDA clearing price. Deterministic (a function of ticker + tick, not
-# random.uniform and not a random walk) — the scenario driver the PRD calls a
-# "macro shock". Set both to 0 to disable and return to pure agent trading.
-EVENT_SHOCK_VOL: float = 0.00
-EVENT_SHOCK_DRIFT: float = 0.00
+# NOTE: the former EVENT_SHOCK_* synthetic price overlay is gone. All price
+# movement now comes from real order flow: heuristic behavioral cohorts
+# (behavioral_agents.py), LLM swarm cohorts when quota allows, and TimesFM
+# institutional funds — matched in the CDA. The Black Swan event impacts
+# prices only through agent beliefs (sentiment + fear prior), never through
+# a multiplier on the clearing price.
 
 SWARM_PROMPT_TEMPLATE: str = """You are a JSON API simulating {n} retail trading cohorts in a multi-stock market. You never explain; you only output JSON.
 
@@ -106,8 +108,20 @@ starting with the character [ and nothing else, exactly this shape:
 [{{"cohort": 0, "orders": [{{"ticker": "AAPL", "action": "BUY", "qty": 10, "limit_price": 232.5}}]}}]"""
 
 
+# Simulated-clock override. The controller sets this at the top of every tick
+# (single-writer: ticks execute one at a time on the event loop), so every
+# event envelope and DB timestamp within a tick carries simulated time rather
+# than wall-clock time. Empty string = fall back to wall clock.
+_SIM_TS: str = ""
+
+
+def _set_sim_ts(iso: str) -> None:
+    global _SIM_TS
+    _SIM_TS = iso
+
+
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return _SIM_TS or datetime.now(timezone.utc).isoformat()
 
 
 def _event(event_type: str, tick_id: int, payload: dict[str, Any]) -> dict[str, Any]:
@@ -202,9 +216,11 @@ class TickEngine:
         self.analyst = MacroAnalyst(router)
 
     async def execute_simulation_tick(
-        self, tick_id: int, active_event: str
+        self, tick_id: int, active_event: str, sim_time: datetime | None = None
     ) -> list[dict[str, Any]]:
         """Run one tick; returns the ordered event list for /ws broadcast."""
+        self._sim_time = sim_time or datetime.now(timezone.utc)
+        _set_sim_ts(self._sim_time.isoformat())
         events: list[dict[str, Any]] = [_event("tick_start", tick_id, {"tick_id": tick_id})]
         events.append(_event("news", tick_id, {"headline": active_event}))
 
@@ -241,13 +257,31 @@ class TickEngine:
 
                 events += [_event("social_post", tick_id, _post_payload(p)) for p in posts]
 
-                orders = swarm_orders + self._build_institutional_orders(
-                    tick_id, institutional, holdings, forecasts, companies
+                # Cohorts the LLM decided for keep their LLM orders; every
+                # other cohort trades via its heuristic strategy, so the
+                # market is fully populated with real order flow regardless
+                # of LLM quota. Prices are set ONLY by the CDA below.
+                decided = {o.agent_id for o in swarm_orders}
+                behavioral_orders = build_behavioral_orders(
+                    tick_id,
+                    retail,
+                    companies,
+                    holdings,
+                    histories,
+                    event_active=bool(active_event),
+                    decided_agent_ids=decided,
+                )
+                orders = (
+                    swarm_orders
+                    + behavioral_orders
+                    + self._build_institutional_orders(
+                        tick_id, institutional, holdings, forecasts, companies
+                    )
                 )
 
                 # 6. CDA per ticker (the one and only matching engine).
                 price_updates = self._clear_markets(
-                    db, tick_id, companies, orders, agents, holdings, active_event
+                    db, tick_id, companies, orders, agents, holdings
                 )
                 events.append(_event("price_update", tick_id, {"prices": price_updates}))
 
@@ -309,6 +343,7 @@ class TickEngine:
                     current_price=index_level,
                     news_headline=active_event,
                     system_stress_index=snapshot["system_stress_index"],
+                    timestamp=self._sim_time,
                 )
             )
             db.commit()
@@ -387,6 +422,7 @@ class TickEngine:
                 sentiment=d.sentiment,
                 likes=int(150 * abs(d.sentiment)) + 25,
                 reposts=(int(150 * abs(d.sentiment)) + 25) // 6,
+                ts=getattr(self, "_sim_time", None) or datetime.now(timezone.utc),
             )
             db.add(post)
             posts.append(post)
@@ -561,10 +597,8 @@ class TickEngine:
         orders: list[OrderBook],
         agents: list[AgentState],
         holdings: dict[str, dict[str, int]],
-        active_event: str,
     ) -> list[dict[str, Any]]:
         by_agent = {a.agent_id: a for a in agents}
-        shock_on = bool(active_event.strip())
         price_updates: list[dict[str, Any]] = []
 
         for company in companies:
@@ -580,16 +614,14 @@ class TickEngine:
                 if o.status == OrderStatus.PENDING:
                     o.status = OrderStatus.CANCELLED
 
-            # Macro-shock overlay (see EVENT_SHOCK_* ) — the active Black Swan
-            # event's impact on the clearing price.
-            if shock_on:
-                clearing_price = max(
-                    0.01, clearing_price * (1.0 + self._event_shock(company.ticker, tick_id))
-                )
             company.current_price = clearing_price
             db.add(
                 PriceTick(
-                    tick_id=tick_id, ticker=company.ticker, price=clearing_price, volume=volume
+                    tick_id=tick_id,
+                    ticker=company.ticker,
+                    price=clearing_price,
+                    volume=volume,
+                    ts=getattr(self, "_sim_time", None) or datetime.now(timezone.utc),
                 )
             )
             price_updates.append(
@@ -607,26 +639,6 @@ class TickEngine:
             if agent.cash_balance <= 0:
                 agent.is_bankrupt = True
         return price_updates
-
-    @staticmethod
-    def _event_shock(ticker: str, tick_id: int) -> float:
-        """Per-company macro-shock multiplier delta for the active event.
-
-        Deterministic: an oscillating stress wave (phase seeded from the
-        ticker) plus a downward drift. Companies diverge, prices swing up and
-        down between ticks (real candle bodies + wicks once bucketed), and the
-        drift bends the whole market into a Black-Swan decline.
-        """
-        phase = (sum(ord(ch) for ch in ticker) % 100) / 100.0 * 2.0 * math.pi
-        # Slow swing (the overall stress wave) plus a faster wiggle so prices
-        # reverse within a candle bucket, producing real wicks/shadows once
-        # ticks are aggregated. Downward drift bends it into a decline.
-        slow = math.sin(tick_id * 0.4 + phase) * EVENT_SHOCK_VOL
-        # ~2.3-tick period, dominant amplitude, so consecutive ticks zigzag
-        # up/down: any 3-tick candle bucket straddles a local extreme, giving
-        # a clearly visible wick/shadow beyond the body.
-        fast = math.sin(tick_id * 2.7 + phase * 2.0) * EVENT_SHOCK_VOL * 1.3
-        return slow + fast + EVENT_SHOCK_DRIFT
 
     @staticmethod
     def _one_sided_pressure(book: list[OrderBook], baseline: float) -> float:

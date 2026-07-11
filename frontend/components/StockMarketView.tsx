@@ -18,7 +18,6 @@ import type {
   IChartApi,
   ISeriesApi,
   UTCTimestamp,
-  Time,
   CandlestickData,
   HistogramData,
 } from "lightweight-charts";
@@ -31,7 +30,7 @@ const UP = "#16c60c";
 const DOWN = "#ff4d4f";
 const VOL_UP = "rgba(22,198,12,0.30)";
 const VOL_DOWN = "rgba(255,77,79,0.30)";
-const TARGET_CANDLES = 30;
+const TARGET_CANDLES = 60;
 // Below this many ticks we can't form multi-tick candles, so shadows (wicks)
 // won't appear yet; above it we bucket >=2 ticks per candle so each candle's
 // high/low come from real intra-bucket price movement.
@@ -43,36 +42,64 @@ interface Bucketed {
   volumes: HistogramData[];
 }
 
-// Aggregate the tick-level price series into OHLC candles. With one tick per
-// candle there are no wicks; as ticks accumulate, each bucket's high/low come
-// from real intra-bucket movement.
+const DAY_SECONDS = 86400;
+
+// Aggregate tick-level prices into OHLC candles the way a real chart does:
+// one candle per simulated DAY, with open/high/low/close taken from that
+// day's intraday ticks (real wicks whenever the sim runs >1 tick/day).
+// Falls back to count-based bucketing when there's at most one tick per day.
 function bucketize(points: PricePoint[]): Bucketed {
   const clean = points.filter((p) => p.price > 0).sort((a, b) => a.t - b.t);
   if (clean.length === 0) return { candles: [], volumes: [] };
-  const k =
-    clean.length >= MIN_TICKS_FOR_SHADOWS
-      ? Math.max(MIN_BUCKET, Math.round(clean.length / TARGET_CANDLES))
-      : 1;
+
+  // Group by simulated calendar day.
+  const byDay = new Map<number, PricePoint[]>();
+  for (const p of clean) {
+    const day = Math.floor(p.t / DAY_SECONDS);
+    const arr = byDay.get(day);
+    if (arr) arr.push(p);
+    else byDay.set(day, [p]);
+  }
+  const intraday = clean.length / byDay.size >= 2;
+
+  const buckets: PricePoint[][] = [];
+  const times: number[] = [];
+  if (intraday) {
+    for (const [day, arr] of [...byDay.entries()].sort((a, b) => a[0] - b[0])) {
+      buckets.push(arr);
+      times.push(day * DAY_SECONDS);
+    }
+  } else {
+    // One tick per day (or sparser): bucket a few ticks per candle so
+    // high/low still come from real price movement.
+    const k =
+      clean.length >= MIN_TICKS_FOR_SHADOWS
+        ? Math.max(MIN_BUCKET, Math.round(clean.length / TARGET_CANDLES))
+        : 1;
+    for (let i = 0; i < clean.length; i += k) {
+      const bucket = clean.slice(i, i + k);
+      buckets.push(bucket);
+      times.push(bucket[bucket.length - 1].t);
+    }
+  }
 
   const candles: CandlestickData[] = [];
   const volumes: HistogramData[] = [];
   const seen = new Set<number>();
-
-  for (let i = 0; i < clean.length; i += k) {
-    const bucket = clean.slice(i, i + k);
+  buckets.forEach((bucket, i) => {
     const prices = bucket.map((p) => p.price);
     const open = prices[0];
     const close = prices[prices.length - 1];
     const high = Math.max(...prices);
     const low = Math.min(...prices);
     const vol = bucket.reduce((sum, p) => sum + (p.volume ?? 0), 0);
-    let t = bucket[bucket.length - 1].t;
-    while (seen.has(t)) t += 1; // guarantee strictly-ascending unique time
+    let t = times[i];
+    while (seen.has(t)) t += 1; // strictly-ascending unique times
     seen.add(t);
     const time = t as UTCTimestamp;
     candles.push({ time, open, high, low, close });
     volumes.push({ time, value: vol, color: close >= open ? VOL_UP : VOL_DOWN });
-  }
+  });
   return { candles, volumes };
 }
 
@@ -120,19 +147,21 @@ export default function StockMarketView() {
       },
       timeScale: {
         borderColor: "rgba(255,255,255,0.08)",
-        timeVisible: false,
+        // Point times are simulated epoch seconds, so the axis reads like a
+        // real trading chart (dates/times), not tick ordinals.
+        timeVisible: true,
         secondsVisible: false,
-        // Fixed candle width so sparse data doesn't stretch into huge blocks.
-        barSpacing: 9,
-        minBarSpacing: 4,
-        rightOffset: 6,
+        // Thin candles, fixed width so sparse data doesn't stretch into
+        // huge blocks.
+        barSpacing: 6,
+        minBarSpacing: 2,
+        rightOffset: 4,
       },
       crosshair: {
         mode: CrosshairMode.Normal,
         vertLine: { color: "rgba(255,255,255,0.15)", labelBackgroundColor: "#111" },
         horzLine: { color: "rgba(255,255,255,0.15)", labelBackgroundColor: "#111" },
       },
-      localization: { timeFormatter: (t: Time) => `#${String(t)}` },
       handleScroll: true,
       handleScale: true,
     });
@@ -198,7 +227,10 @@ export default function StockMarketView() {
     if (!candleRef.current || !volRef.current || !chartRef.current) return;
     candleRef.current.setData(bucketed.candles);
     volRef.current.setData(bucketed.volumes);
-    if (bucketed.candles.length > 0) chartRef.current.timeScale().fitContent();
+    // Never fitContent(): stretching a handful of candles across the full
+    // width produces giant blocks. Fixed barSpacing keeps candles thin and
+    // uniform (real-chart behavior); just keep the latest candle in view.
+    if (bucketed.candles.length > 0) chartRef.current.timeScale().scrollToRealTime();
   }, [bucketed]);
 
   const hasData = bucketed.candles.length > 0;

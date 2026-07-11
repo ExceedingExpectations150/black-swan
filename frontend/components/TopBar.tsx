@@ -25,6 +25,13 @@ export default function TopBar() {
   const companies = useCompanyList();
   const setSelectedTicker = useStore((s) => s.setSelectedTicker);
   const { time, date } = useUtcClock();
+  // Simulated market clock — advances with ticks, not wall time.
+  const simTime = useStore((s) => s.simTime);
+  const simClock = useMemo(() => {
+    if (simTime === null) return { time: "", date: "" };
+    const iso = new Date(simTime * 1000).toISOString();
+    return { time: iso.slice(11, 19), date: iso.slice(0, 10) };
+  }, [simTime]);
   const [query, setQuery] = useState("");
 
   const matches = useMemo(() => {
@@ -110,8 +117,17 @@ export default function TopBar() {
       <SimulationControls />
 
       <div className="shrink-0 text-right leading-none ml-4">
-        <div className="tnum text-sm text-ink">{time}</div>
-        <div className="tnum mt-0.5 text-[10px] text-ink3">{date} UTC</div>
+        {simTime !== null ? (
+          <>
+            <div className="tnum text-sm text-accent">{simClock.time}</div>
+            <div className="tnum mt-0.5 text-[10px] text-ink3">{simClock.date} SIM</div>
+          </>
+        ) : (
+          <>
+            <div className="tnum text-sm text-ink">{time}</div>
+            <div className="tnum mt-0.5 text-[10px] text-ink3">{date} UTC</div>
+          </>
+        )}
       </div>
     </header>
   );

@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -31,6 +32,13 @@ from models import Company, EconomySnapshot, PriceTick, SocialPost, WorldState, 
 logger = logging.getLogger("chaosnet.main")
 
 TICK_INTERVAL_SECONDS: float = 3.0
+
+
+def _epoch(dt: datetime) -> int:
+    """Datetime -> epoch seconds; SQLite returns naive datetimes, treat as UTC."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
 
 
 def _company_payload(company: Company) -> dict[str, Any]:
@@ -125,6 +133,16 @@ class SimulationController:
         self.max_ticks: int | None = None
         self.duration_days: int | None = None
         self.ticks_per_day: int | None = None
+        # Simulated clock: each tick advances sim time by one trading step
+        # (24h / ticks_per_day). Anchored when a fresh run starts.
+        self.sim_start: datetime | None = None
+
+    def sim_seconds_per_tick(self) -> float:
+        return 86400.0 / float(self.ticks_per_day or 1)
+
+    def sim_time_for(self, tick_id: int) -> datetime:
+        base = self.sim_start or datetime.now(timezone.utc)
+        return base + timedelta(seconds=(tick_id - 1) * self.sim_seconds_per_tick())
 
     def get_status_payload(self) -> dict[str, Any]:
         return {
@@ -135,7 +153,10 @@ class SimulationController:
             "next_tick": self.next_tick_id,
             "max_ticks": self.max_ticks,
             "duration_days": self.duration_days,
-            "ticks_per_day": self.ticks_per_day
+            "ticks_per_day": self.ticks_per_day,
+            "sim_start": self.sim_start.isoformat() if self.sim_start else None,
+            "sim_time": self.sim_time_for(self.next_tick_id).isoformat(),
+            "sim_seconds_per_tick": self.sim_seconds_per_tick(),
         }
 
     @property
@@ -146,6 +167,29 @@ class SimulationController:
         with SessionLocal() as db:
             latest = db.execute(select(func.max(WorldState.tick_id))).scalar_one()
         self.next_tick_id = (latest or 0) + 1
+
+    def reset_world(self, preserve_event: bool = False) -> int:
+        """Wipe the database, reseed, and zero the controller counters.
+
+        The caller must have stopped the run loop first. `preserve_event`
+        keeps the armed Black Swan headline (used when a new run resets the
+        world after the event was already posted).
+        """
+        Base.metadata.drop_all(bind=engine)
+        init_db()
+        created = seed_initial_market_state()
+        logger.info("World reset. Seeded %d agents.", created)
+        self.next_tick_id = 1
+        if not preserve_event:
+            self.active_event = ""
+        self.paused = False
+        self.target_tick = None
+        self.max_ticks = None
+        self.duration_days = None
+        self.ticks_per_day = None
+        self.sim_start = None
+        self.tick_engine = None  # rebuild to clear any cached state
+        return created
 
     def build_engines(self) -> None:
         """Construct the AI layers. Hard-errors without keys/torch by design."""
@@ -178,7 +222,9 @@ class SimulationController:
                     await asyncio.sleep(0.5)
                     continue
 
-                if self.target_tick is not None and self.next_tick_id >= self.target_tick:
+                # `>` (not `>=`): target_tick is the LAST tick that should
+                # run — pausing at >= skipped it (25-day runs did 24 ticks).
+                if self.target_tick is not None and self.next_tick_id > self.target_tick:
                     self.paused = True
                     self.target_tick = None
                     await self.manager.broadcast({
@@ -191,7 +237,9 @@ class SimulationController:
                     continue
 
                 events = await self.tick_engine.execute_simulation_tick(
-                    self.next_tick_id, self.active_event
+                    self.next_tick_id,
+                    self.active_event,
+                    sim_time=self.sim_time_for(self.next_tick_id),
                 )
                 self.next_tick_id += 1
                 for event in events:
@@ -269,24 +317,46 @@ class DurationPayload(BaseModel):
 @app.post("/api/start")
 async def start_simulation(payload: StartPayload | None = None) -> dict[str, Any]:
     if controller.is_running:
-        return {"status": "already_running", "payload": controller.get_status_payload()}
-        
+        if not controller.paused:
+            # Actively ticking — don't stomp a live run.
+            return {"status": "already_running", "payload": controller.get_status_payload()}
+        # Paused loop (a completed run parks here, task still alive in its
+        # sleep loop). Starting again means "new simulation": stop the old
+        # task so the fresh-start path below can reset the world. Resuming
+        # a paused run is /api/resume, not /api/start.
+        controller.task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await controller.task
+        controller.task = None
+
+    # A new simulation always begins from a clean world at tick 1. If a
+    # previous run left ticks behind, wipe and reseed (keeping the armed
+    # event, which the client posts before calling start).
+    controller.load_tick_counter()
+    world_was_reset = False
+    if controller.next_tick_id > 1:
+        controller.reset_world(preserve_event=True)
+        world_was_reset = True
+
     if payload:
         controller.tick_interval_seconds = payload.speed
         controller.duration_days = payload.duration_days
         controller.ticks_per_day = payload.ticks_per_day
         controller.max_ticks = payload.duration_days * payload.ticks_per_day
         controller.target_tick = controller.next_tick_id + controller.max_ticks - 1
-        
+
+    controller.sim_start = datetime.now(timezone.utc)
+
     try:
         controller.build_engines()
     except Exception as exc:
         logger.exception("AI layer startup failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    controller.load_tick_counter()
     controller.paused = False
     controller.task = asyncio.create_task(controller.run_loop())
     status = controller.get_status_payload()
+    if world_was_reset:
+        asyncio.create_task(controller.manager.broadcast({"type": "reset", "tick_id": 1, "ts": "", "payload": status}))
     asyncio.create_task(controller.manager.broadcast({"type": "sim_status", "tick_id": controller.next_tick_id, "ts": "", "payload": status}))
     return {
         "status": "started",
@@ -317,23 +387,10 @@ async def reset_simulation() -> dict[str, Any]:
             await controller.task
         controller.task = None
 
-    # Drop and recreate the entire database
-    Base.metadata.drop_all(bind=engine)
-    init_db()
-    created = seed_initial_market_state()
-    logger.info("Database reset. Seeded %d agents.", created)
-    
-    # Reset controller state
-    controller.next_tick_id = 1
-    controller.active_event = ""
-    controller.paused = False
-    controller.target_tick = None
-    controller.max_ticks = None
-    controller.duration_days = None
-    controller.ticks_per_day = None
-    controller.tick_engine = None # Rebuild to clear any cached states
-    
+    controller.reset_world(preserve_event=False)
+
     if was_running:
+        controller.sim_start = datetime.now(timezone.utc)
         controller.build_engines()
         controller.task = asyncio.create_task(controller.run_loop())
 
@@ -500,7 +557,8 @@ async def get_company(ticker: str) -> dict[str, Any]:
     payload = _company_payload(company)
     payload["recent_posts"] = [_post_payload(p) for p in posts]
     payload["price_series"] = [
-        {"t": row.tick_id, "price": row.price, "volume": row.volume} for row in reversed(series)
+        {"t": _epoch(row.ts), "tick": row.tick_id, "price": row.price, "volume": row.volume}
+        for row in reversed(series)
     ]
     return payload
 
@@ -523,7 +581,14 @@ async def get_company_prices(ticker: str, limit: int = 512) -> dict[str, Any]:
     return {
         "ticker": company.ticker,
         "prices": [
-            {"t": row.tick_id, "price": row.price, "volume": row.volume}
+            {
+                # t is simulated time (epoch seconds) so charts get a real
+                # time axis; tick keeps the ordinal for tick-based views.
+                "t": _epoch(row.ts),
+                "tick": row.tick_id,
+                "price": row.price,
+                "volume": row.volume,
+            }
             for row in reversed(series)
         ],
     }

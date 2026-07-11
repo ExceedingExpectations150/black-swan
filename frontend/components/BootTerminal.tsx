@@ -139,8 +139,9 @@ function DitheredCoin() {
   );
 }
 
-// Same defaults the SimulationSetupModal uses: MAX speed, 30 days, daily ticks.
-const DEFAULT_START = { speed: 0.0, duration_days: 30, ticks_per_day: 1 };
+// Same defaults the SimulationSetupModal uses: MAX speed, 30 days, 4 ticks
+// per day (6-hour resolution — gives every daily candle a real OHLC range).
+const DEFAULT_START = { speed: 0.0, duration_days: 30, ticks_per_day: 4 };
 
 type Phase = "boot" | "prompt" | "launching";
 

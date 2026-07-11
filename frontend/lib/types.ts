@@ -76,7 +76,10 @@ export interface MarketIndex {
 }
 
 export interface PricePoint {
+  /** Simulated time, epoch seconds — drives real time axes on charts. */
   t: number;
+  /** Simulation tick ordinal (kept for tick-based views/scrubbing). */
+  tick?: number;
   price: number;
   volume?: number;
 }

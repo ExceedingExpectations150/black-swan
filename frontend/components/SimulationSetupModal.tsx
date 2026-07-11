@@ -19,7 +19,8 @@ export default function SimulationSetupModal() {
   const [isLoading, setIsLoading] = useState(false);
   const [scenario, setScenario] = useState("");
   const [durationDays, setDurationDays] = useState(30);
-  const [ticksPerDay, setTicksPerDay] = useState(1);
+  // 4 ticks/day (6-hour) by default so daily candles carry real OHLC range.
+  const [ticksPerDay, setTicksPerDay] = useState(4);
   const [speed, setSpeed] = useState(0.0); // MAX default
 
   if (!shouldShow) return null;

@@ -111,7 +111,7 @@ function DitheredCoin() {
       const d = img.data;
       ctx.fillStyle = "#000";
       ctx.fillRect(0, 0, size, size);
-      ctx.fillStyle = "#16c60c";
+      ctx.fillStyle = "#22e06a"; // same green as .term-green boot text
       for (let y = 0; y < COIN_GRID; y++) {
         for (let x = 0; x < COIN_GRID; x++) {
           const lum = d[(y * COIN_GRID + x) * 4] / 255; // gray, so R channel is enough

@@ -44,6 +44,8 @@ interface StoreState {
   maxTicks: number | null;
   durationDays: number | null;
   ticksPerDay: number | null;
+  /** True once the boot terminal armed the event and started the run itself. */
+  bootLaunched: boolean;
 
   // actions
   hydrate: (snapshot: StateSnapshot) => void;
@@ -74,6 +76,7 @@ interface StoreState {
   fetchHistory: (tickId: number) => Promise<void>;
   clearHistory: () => void;
   setSimStatus: (paused: boolean, tickInterval: number, isPausing?: boolean, maxTicks?: number | null, durationDays?: number | null, ticksPerDay?: number | null) => void;
+  setBootLaunched: () => void;
 }
 
 export const useStore = create<StoreState>((set) => ({
@@ -98,6 +101,7 @@ export const useStore = create<StoreState>((set) => ({
   maxTicks: null,
   durationDays: null,
   ticksPerDay: null,
+  bootLaunched: false,
 
   hydrate: (snapshot) =>
     set((s) => {
@@ -115,8 +119,8 @@ export const useStore = create<StoreState>((set) => ({
         news: "",
         tickId: snapshot.tick_id,
         latestTickId: isFreshDB ? 0 : Math.max(s.latestTickId, snapshot.tick_id),
-        isPaused: snapshot.paused,
-        tickInterval: snapshot.tick_interval_seconds,
+        isPaused: snapshot.paused ?? s.isPaused,
+        tickInterval: snapshot.tick_interval_seconds ?? s.tickInterval,
         maxTicks: snapshot.max_ticks ?? s.maxTicks,
         durationDays: snapshot.duration_days ?? s.durationDays,
         ticksPerDay: snapshot.ticks_per_day ?? s.ticksPerDay,
@@ -205,7 +209,7 @@ export const useStore = create<StoreState>((set) => ({
 
   setEconomy: (economy) => set((s) => {
     if (s.scrubbedTickId !== null) return s;
-    let newAlerts: Alert[] = [];
+    const newAlerts: Alert[] = [];
     if (s.economy && s.economy.system_stress_index < 0.8 && economy.system_stress_index >= 0.8) {
       newAlerts.push({
          id: Math.random().toString(36).substring(7),
@@ -297,6 +301,8 @@ export const useStore = create<StoreState>((set) => ({
 
   setSimStatus: (paused, interval, isPausing = false, maxTicks = null, durationDays = null, ticksPerDay = null) =>
     set({ isPaused: paused, tickInterval: interval, isPausing, maxTicks, durationDays, ticksPerDay }),
+
+  setBootLaunched: () => set({ bootLaunched: true }),
 }));
 
 // Company list as a MEMOIZED hook. A raw selector returning Object.values()

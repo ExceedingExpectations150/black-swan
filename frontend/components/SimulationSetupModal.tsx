@@ -8,11 +8,13 @@ import { API_BASE } from "@/lib/socket";
 export default function SimulationSetupModal() {
   const latestTickId = useStore((s) => s.latestTickId);
   const connection = useStore((s) => s.connectionStatus);
-  const isPaused = useStore((s) => s.isPaused);
-  
+  const bootLaunched = useStore((s) => s.bootLaunched);
+
   // Show this modal if we are connected but the simulation is exactly at Tick 0.
-  // Once it starts (tick > 0), the modal disappears forever.
-  const shouldShow = connection === "open" && latestTickId === 0;
+  // Once it starts (tick > 0), the modal disappears forever. When the boot
+  // terminal already armed and started the run, stay hidden while tick 1 is
+  // still being computed — the modal remains the fallback if that start failed.
+  const shouldShow = connection === "open" && latestTickId === 0 && !bootLaunched;
 
   const [isLoading, setIsLoading] = useState(false);
   const [scenario, setScenario] = useState("");

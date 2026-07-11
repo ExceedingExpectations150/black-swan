@@ -251,17 +251,19 @@ class TickEngine:
                 )
                 quant_task = asyncio.to_thread(self._forecast_all, histories)
                 
-                posts, swarm_orders, forecasts = await asyncio.gather(
+                posts, swarm_result, forecasts = await asyncio.gather(
                     news_task, swarm_task, quant_task
                 )
+                swarm_orders, llm_decided = swarm_result
 
                 events += [_event("social_post", tick_id, _post_payload(p)) for p in posts]
 
-                # Cohorts the LLM decided for keep their LLM orders; every
-                # other cohort trades via its heuristic strategy, so the
-                # market is fully populated with real order flow regardless
-                # of LLM quota. Prices are set ONLY by the CDA below.
-                decided = {o.agent_id for o in swarm_orders}
+                # Cohorts the LLM decided for keep their LLM decision — even
+                # a deliberate HOLD (an entry with no orders). Every other
+                # cohort trades via its heuristic strategy, so the market is
+                # fully populated with real order flow regardless of LLM
+                # quota. Prices are set ONLY by the CDA below.
+                decided = llm_decided | {o.agent_id for o in swarm_orders}
                 behavioral_orders = build_behavioral_orders(
                     tick_id,
                     retail,
@@ -441,7 +443,7 @@ class TickEngine:
         feed: list[SocialPost],
         headline: str,
         tick_id: int,
-    ) -> list[OrderBook]:
+    ) -> tuple[list[OrderBook], set[str]]:
         market_block = "\n".join(
             f"{c.ticker} | ${c.current_price:.2f} | {_change_pct(c):+.2f}% | {c.sentiment:+.2f}"
             for c in companies
@@ -482,10 +484,10 @@ class TickEngine:
                 )
             except asyncio.TimeoutError:
                 logger.warning("swarm batch @%d timed out after 60s (tick %d)", base, tick_id)
-                return []
+                return [], set()
             except RuntimeError as exc:
                 logger.warning("swarm batch @%d failed (tick %d): %s", base, tick_id, exc)
-                return []
+                return [], set()
             decisions = parse_swarm_reply(raw, len(batch))
             if not decisions:
                 logger.warning(
@@ -524,7 +526,11 @@ class TickEngine:
                             status=OrderStatus.PENDING,
                         )
                     )
-            return built
+            # An entry in the reply is a decision even when its orders list
+            # is empty — a deliberate HOLD must not be overridden by the
+            # heuristic layer downstream.
+            decided = {batch[idx].agent_id for idx in decisions}
+            return built, decided
 
         batches = [
             retail[i : i + COHORT_BATCH_SIZE] for i in range(0, len(retail), COHORT_BATCH_SIZE)
@@ -532,7 +538,9 @@ class TickEngine:
         results = await asyncio.gather(
             *(run_batch(b, i * COHORT_BATCH_SIZE) for i, b in enumerate(batches))
         )
-        return [order for sub in results for order in sub]
+        orders = [order for built, _ in results for order in built]
+        decided_ids = set().union(*(decided for _, decided in results)) if results else set()
+        return orders, decided_ids
 
     # ------------------------------------------------------------------ #
     # Quant funds                                                         #

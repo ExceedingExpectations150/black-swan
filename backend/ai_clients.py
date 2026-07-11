@@ -32,8 +32,11 @@ GEMINI_ENDPOINT_TEMPLATE: Final[str] = (
 # requested JSON. gemini-2.5-flash follows JSON-only instructions cleanly, so
 # it is primary; the 429 engine rotates keys and scales down to a lighter
 # flash. The "Gemma cohort" concept is preserved; only the served model differs.
-PRIMARY_MODEL: Final[str] = "gemma-4-31b-it"
-FALLBACK_MODEL: Final[str] = "gemma-4-26b-it"
+# NOTE: these must match the comment above — gemma-4-31b-it 500s and
+# gemma-4-26b-it 404s on the live API (verified 2026-07-11 in run logs),
+# which silently killed every LLM feature (news desk, PR posts, swarm).
+PRIMARY_MODEL: Final[str] = os.getenv("BLACKSWAN_LLM_PRIMARY", "gemini-2.5-flash")
+FALLBACK_MODEL: Final[str] = os.getenv("BLACKSWAN_LLM_FALLBACK", "gemini-2.0-flash")
 # Retry/backoff kept short: under free-tier quota the LLM cohort/PR calls
 # 429 every tick, and long backoff stalls the whole simulation. The quant
 # (TimesFM) path is local and unaffected, so a fast fail keeps ticks flowing.

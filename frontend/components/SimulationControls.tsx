@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Play, Pause, Square, Gauge, Clock, Loader2, RotateCcw } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { API_BASE } from "@/lib/socket";
@@ -13,6 +13,12 @@ export default function SimulationControls() {
 
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingResume, setIsLoadingResume] = useState(false);
+  // Two-step destructive action: first click arms, second click within 3s fires.
+  const [resetArmed, setResetArmed] = useState(false);
+  const armTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (armTimer.current) clearTimeout(armTimer.current);
+  }, []);
 
   const handlePause = async () => {
     setIsLoading(true);
@@ -42,7 +48,14 @@ export default function SimulationControls() {
   };
 
   const handleReset = async () => {
-    if (!confirm("Are you sure you want to completely wipe and reset the simulation?")) return;
+    if (!resetArmed) {
+      setResetArmed(true);
+      if (armTimer.current) clearTimeout(armTimer.current);
+      armTimer.current = setTimeout(() => setResetArmed(false), 3000);
+      return;
+    }
+    if (armTimer.current) clearTimeout(armTimer.current);
+    setResetArmed(false);
     setIsLoading(true);
     try {
       await fetch(`${API_BASE}/api/reset`, { method: "POST" });
@@ -107,7 +120,7 @@ export default function SimulationControls() {
           <button
             onClick={handlePause}
             disabled={isLoading || isPausing}
-            className={`w-10 h-7 flex items-center justify-center transition-colors disabled:opacity-50 ${isPausing ? 'bg-amber-500/20 text-amber-500' : 'bg-white/10 hover:bg-white/20 text-white'}`}
+            className={`w-10 h-7 flex items-center justify-center transition-colors disabled:opacity-50 ${isPausing ? 'bg-warn/20 text-warn' : 'bg-white/10 hover:bg-white/20 text-white'}`}
             title={isPausing ? "Pausing..." : "Pause"}
           >
             {isPausing ? (
@@ -127,13 +140,20 @@ export default function SimulationControls() {
         >
           <Square size={14} fill="currentColor" />
         </button>
-        <button 
-          onClick={handleReset} 
+        <button
+          onClick={handleReset}
           disabled={isLoading}
-          className="w-10 h-7 flex items-center justify-center hover:bg-white/10 text-ink3 hover:text-red-500 transition-colors disabled:opacity-50 border-l border-white/10"
-          title="Wipe & Reset Simulation"
+          className={`h-7 flex items-center justify-center gap-1 transition-colors disabled:opacity-50 border-l border-white/10 ${
+            resetArmed
+              ? "w-auto px-2 bg-down/20 text-down"
+              : "w-10 hover:bg-white/10 text-ink3 hover:text-down"
+          }`}
+          title={resetArmed ? "Click again to wipe & reset" : "Wipe & Reset Simulation"}
         >
           <RotateCcw size={14} />
+          {resetArmed && (
+            <span className="text-[9px] font-semibold uppercase tracking-[0.1em]">Confirm</span>
+          )}
         </button>
       </div>
 

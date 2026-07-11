@@ -51,14 +51,16 @@ export default function TimelineSlider() {
   if (latestTickId <= 1 && sliderValue <= 1) return null;
 
   const sliderMax = maxTicks ? Math.max(maxTicks, latestTickId) : latestTickId;
-  
-  let formattedLabel = `Tick: ${sliderValue} / ${sliderMax}`;
+
+  let unit = "Tick";
+  let current = sliderValue;
+  let total = sliderMax;
   if (durationDays && ticksPerDay) {
-    const currentDay = Math.ceil(sliderValue / ticksPerDay);
-    const maxDay = Math.max(durationDays, Math.ceil(sliderMax / ticksPerDay));
-    formattedLabel = `Day: ${currentDay} / ${maxDay}`;
+    unit = "Day";
+    current = Math.ceil(sliderValue / ticksPerDay);
+    total = Math.max(durationDays, Math.ceil(sliderMax / ticksPerDay));
   } else if (maxTicks === 30 || maxTicks === 7) {
-    formattedLabel = `Day: ${sliderValue} / ${sliderMax}`;
+    unit = "Day";
   }
 
   return (
@@ -66,9 +68,9 @@ export default function TimelineSlider() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           {scrubbedTickId !== null ? (
-            <button 
+            <button
               onClick={returnToLive}
-              className="flex items-center gap-1.5 px-3 py-1 rounded bg-accent/20 text-accent hover:bg-accent/30 transition-colors text-xs font-medium uppercase tracking-wider"
+              className="flex items-center gap-1.5 px-3 py-1 rounded-sm bg-accent/20 text-accent hover:bg-accent/30 transition-colors text-xs font-medium uppercase tracking-wider"
             >
               <Play size={14} />
               Return to Live
@@ -80,8 +82,8 @@ export default function TimelineSlider() {
             </div>
           )}
         </div>
-        <div className="text-xs text-ink2 font-mono">
-          {formattedLabel.split(':')[0]}: <span className="text-ink1 font-bold">{formattedLabel.split(':')[1].split('/')[0].trim()}</span> / {formattedLabel.split('/')[1].trim()}
+        <div className="tnum text-xs text-ink2 font-mono">
+          {unit}: <span className="text-ink font-bold">{current}</span> / {total}
         </div>
       </div>
       

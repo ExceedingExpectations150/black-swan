@@ -55,7 +55,7 @@ export default function TopMovers() {
                   onClick={() => setSelectedTicker(mover.ticker)}
                   className="flex w-full items-center gap-3 border-t border-hair/60 px-3 py-2.5 text-left transition hover:bg-white/[0.03]"
                 >
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-white/[0.05] text-[10px] font-semibold text-ink2 ring-1 ring-inset ring-hair">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-sm bg-white/[0.05] text-[10px] font-semibold text-ink2 ring-1 ring-inset ring-hair">
                     {monogram(company.name)}
                   </span>
                   <span className="min-w-0 flex-1">
@@ -83,9 +83,12 @@ export default function TopMovers() {
         )}
       </div>
 
-      <div className="border-t border-hair px-3 py-2">
-        <span className="cursor-default text-[10px] uppercase tracking-[0.14em] text-ink3 hover:text-ink2">
-          View all movers →
+      <div className="flex items-center justify-between border-t border-hair px-3 py-1.5">
+        <span className="text-[9px] uppercase tracking-[0.14em] text-ink3">
+          {tab === "GAINERS" ? "Session gainers" : "Session losers"}
+        </span>
+        <span className="tnum font-mono text-[9px] uppercase tracking-[0.14em] text-ink3">
+          {rows.length} symbols
         </span>
       </div>
     </div>

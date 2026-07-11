@@ -50,9 +50,10 @@ export default function NewsFeed() {
         )}
       </div>
 
-      <div className="border-t border-hair px-3 py-2">
-        <span className="cursor-default text-[10px] uppercase tracking-[0.14em] text-ink3 hover:text-ink2">
-          View all posts →
+      <div className="flex items-center justify-between border-t border-hair px-3 py-1.5">
+        <span className="text-[9px] uppercase tracking-[0.14em] text-ink3">Wire + desk chatter</span>
+        <span className="tnum font-mono text-[9px] uppercase tracking-[0.14em] text-ink3">
+          {posts.length} posts
         </span>
       </div>
     </div>
@@ -63,14 +64,10 @@ function PostCard({ post, isNewest }: { post: SocialPostT; isNewest: boolean }) 
   const isCompany = post.author_type === "company";
   return (
     <li
-      className={`mb-1.5 flex gap-2.5 rounded-md bg-white/[0.015] p-2.5 ${
+      className={`mb-1.5 flex gap-2.5 rounded-sm bg-white/[0.015] p-2.5 ${
         isNewest ? "post-enter" : ""
       }`}
     >
-      <span
-        className="mt-0.5 w-1 shrink-0 self-stretch rounded-full"
-        style={{ backgroundColor: sentimentColor(post.sentiment) }}
-      />
       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/[0.05] text-ink2 ring-1 ring-inset ring-hair">
         {isCompany ? (
           <span className="text-[10px] font-semibold">
@@ -82,10 +79,15 @@ function PostCard({ post, isNewest }: { post: SocialPostT; isNewest: boolean }) 
       </span>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline gap-x-1.5 text-[11px]">
-          <div className="text-[12px] font-bold text-ink1 mt-0.5 truncate">
+          <div className="text-[12px] font-bold text-ink mt-0.5 truncate">
             {post.author_display} <span className="text-ink3 font-normal font-mono text-[11px] ml-1">{post.handle}</span>
           </div>
           <span className="text-ink3">· {timeAgo(post.ts)}</span>
+          <span
+            className="inline-block h-1.5 w-1.5 self-center rounded-full"
+            title={`Sentiment ${post.sentiment.toFixed(2)}`}
+            style={{ backgroundColor: sentimentColor(post.sentiment) }}
+          />
         </div>
         <p className="mt-1 text-xs leading-relaxed text-ink2">{post.content}</p>
         <div className="mt-1.5 flex items-center gap-4 text-[10px] text-ink3">

@@ -33,7 +33,7 @@ export default function AlertsPanel() {
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto mt-3 pr-2 space-y-2 custom-scroll">
+      <div className="flex-1 overflow-y-auto mt-3 pr-2 space-y-2 scroll-thin">
         {alerts.length === 0 ? (
           <div className="flex h-full items-center justify-center text-xs text-ink3 tracking-widest uppercase">
             No active alerts.
@@ -42,17 +42,17 @@ export default function AlertsPanel() {
           alerts.map((alert) => (
             <div 
               key={alert.id}
-              className={`relative flex items-start gap-3 p-3 rounded-md border ${
-                alert.severity === "critical" 
-                  ? "bg-down/5 border-down/30" 
+              className={`relative flex items-start gap-3 p-3 rounded-sm border ${
+                alert.severity === "critical"
+                  ? "bg-down/5 border-down/30"
                   : alert.severity === "warning"
-                  ? "bg-amber-500/5 border-amber-500/30"
+                  ? "bg-warn/5 border-warn/30"
                   : "bg-white/[0.02] border-hair"
               } ${!alert.read ? "opacity-100" : "opacity-60"}`}
             >
               <div className="shrink-0 mt-0.5">
                 {alert.severity === "critical" && <AlertCircle size={16} className="text-down" />}
-                {alert.severity === "warning" && <AlertTriangle size={16} className="text-amber-500" />}
+                {alert.severity === "warning" && <AlertTriangle size={16} className="text-warn" />}
                 {alert.severity === "info" && <Info size={16} className="text-ink2" />}
               </div>
               <div className="flex-1 min-w-0">

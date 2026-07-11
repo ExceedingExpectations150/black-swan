@@ -17,7 +17,6 @@ type DeskMessage = {
   isError?: boolean;
 };
 
-const AMBER = "#f5a623";
 const LINK_DOWN_MESSAGE = "Desk link down — check the backend connection.";
 
 export default function ChatPanel() {
@@ -78,10 +77,9 @@ export default function ChatPanel() {
         {lastSource && (
           <span className="flex items-center gap-1.5 rounded bg-white/[0.04] px-2 py-1 text-[9px] uppercase tracking-[0.16em] text-ink2">
             <span
-              className="inline-block h-1.5 w-1.5 rounded-full"
-              style={{
-                backgroundColor: lastSource === "llm" ? "var(--up)" : AMBER,
-              }}
+              className={`inline-block h-1.5 w-1.5 rounded-full ${
+                lastSource === "llm" ? "bg-up" : "bg-warn"
+              }`}
             />
             {lastSource === "llm" ? "Desk Model" : "Stats Only"}
           </span>
@@ -98,25 +96,25 @@ export default function ChatPanel() {
             {messages.map((m, i) =>
               m.role === "user" ? (
                 <div key={i} className="flex justify-end">
-                  <div className="max-w-[70%] rounded-md bg-white/[0.07] px-3 py-2 text-xs leading-relaxed text-ink">
+                  <div className="max-w-[70%] rounded-sm bg-white/[0.07] px-3 py-2 text-xs leading-relaxed text-ink">
                     {m.content}
                   </div>
                 </div>
               ) : (
                 <div key={i} className="flex justify-start">
                   <div
-                    className={`max-w-[85%] rounded-md border border-hair bg-white/[0.02] px-3 py-2 ${
-                      m.isError ? "border-l-2" : ""
+                    className={`max-w-[85%] rounded-sm border px-3 py-2 ${
+                      m.isError
+                        ? "border-warn/40 bg-warn/5"
+                        : "border-hair bg-white/[0.02]"
                     }`}
-                    style={m.isError ? { borderLeftColor: AMBER } : undefined}
                   >
                     <div
-                      className="mb-1 text-[9px] uppercase tracking-[0.16em]"
-                      style={{ color: m.isError ? AMBER : undefined }}
+                      className={`mb-1 text-[9px] uppercase tracking-[0.16em] ${
+                        m.isError ? "text-warn" : "text-ink3"
+                      }`}
                     >
-                      <span className={m.isError ? "" : "text-ink3"}>
-                        {m.isError ? "Desk — Link" : "Desk"}
-                      </span>
+                      {m.isError ? "Desk — Link" : "Desk"}
                     </div>
                     <p className="tnum whitespace-pre-wrap font-mono text-xs leading-relaxed text-ink2">
                       {m.content}

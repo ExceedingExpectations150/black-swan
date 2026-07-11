@@ -17,7 +17,7 @@ import Sparkline from "@/components/Sparkline";
 
 export type NavKey = "dashboard" | "market" | "social" | "nodes" | "analytics" | "desk" | "alerts";
 
-const NAV: { key: NavKey; label: string; icon: typeof LayoutDashboard }[] = [
+export const NAV: { key: NavKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { key: "market", label: "Stock Market", icon: LineChart },
   { key: "social", label: "News Feed", icon: MessagesSquare },
@@ -48,20 +48,27 @@ export default function Sidebar({
   return (
     <aside className="flex w-[230px] shrink-0 flex-col gap-4 border-r border-hair p-3">
       <nav className="flex flex-col gap-0.5">
-        {NAV.map(({ key, label, icon: Icon }) => {
+        {NAV.map(({ key, label, icon: Icon }, i) => {
           const on = active === key;
           return (
             <button
               key={key}
               onClick={() => onNavigate(key)}
-              className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-[13px] transition ${
+              className={`flex items-center gap-2.5 rounded-sm px-2.5 py-1.5 text-[12.5px] transition ${
                 on
                   ? "bg-white/[0.07] text-ink"
                   : "text-ink2 hover:bg-white/[0.03] hover:text-ink"
               }`}
             >
               <Icon size={15} />
-              {label}
+              <span className="flex-1 text-left">{label}</span>
+              <kbd
+                className={`tnum font-mono text-[9px] ${
+                  on ? "text-ink3" : "text-ink3/60"
+                }`}
+              >
+                {i + 1}
+              </kbd>
             </button>
           );
         })}

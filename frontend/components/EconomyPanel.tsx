@@ -7,7 +7,7 @@ import type { Mover, VolatileMover } from "@/lib/types";
 // Threshold-driven stress tone, mirrored across the meter and headline value.
 function stressColor(v: number): string {
   if (v > 0.66) return "var(--down)";
-  if (v > 0.33) return "#f5a623";
+  if (v > 0.33) return "var(--warn)";
   return "var(--up)";
 }
 

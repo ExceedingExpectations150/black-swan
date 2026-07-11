@@ -27,6 +27,111 @@ const CHARS_PER_TICK = 3;
 const CHAR_MS = 16;
 const LINE_PAUSE_MS = 70;
 
+// --- Dithered Bitcoin coin flip -------------------------------------------
+// Ordered-dither (Bayer 4x4) render of a coin spinning on its vertical axis,
+// drawn in the terminal's phosphor green. Pure canvas: no assets, loops
+// seamlessly, unmounts with the terminal.
+
+const COIN_GRID = 56; // logical pixel grid (dither resolution)
+const COIN_SCALE = 3; // chunky on-screen pixels
+const BAYER4 = [
+  [0, 8, 2, 10],
+  [12, 4, 14, 6],
+  [3, 11, 1, 9],
+  [15, 7, 13, 5],
+];
+
+function DitheredCoin() {
+  const ref = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    const size = COIN_GRID * COIN_SCALE;
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    const off = document.createElement("canvas");
+    off.width = COIN_GRID;
+    off.height = COIN_GRID;
+    const octx = off.getContext("2d", { willReadFrequently: true });
+    if (!ctx || !octx) return;
+    ctx.imageSmoothingEnabled = false;
+
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const C = COIN_GRID / 2;
+    const R = COIN_GRID * 0.42;
+    let raf = 0;
+    const t0 = performance.now();
+
+    const draw = (now: number) => {
+      // cos(angle) = apparent coin width; the flip.
+      const angle = reduced ? 0.55 : ((now - t0) / 1000) * 2.6;
+      const w = Math.cos(angle);
+      const aw = Math.max(Math.abs(w), 0.045); // never fully vanish edge-on
+
+      // 1) Grayscale coin into the small offscreen buffer.
+      octx.fillStyle = "#000";
+      octx.fillRect(0, 0, COIN_GRID, COIN_GRID);
+      octx.save();
+      octx.translate(C, C);
+      octx.scale(aw, 1);
+      // face: radial shading so the dither gets texture
+      const g = octx.createRadialGradient(-R * 0.35, -R * 0.35, R * 0.15, 0, 0, R);
+      g.addColorStop(0, "#e8e8e8");
+      g.addColorStop(0.72, "#9a9a9a");
+      g.addColorStop(1, "#5a5a5a");
+      octx.fillStyle = g;
+      octx.beginPath();
+      octx.arc(0, 0, R, 0, Math.PI * 2);
+      octx.fill();
+      // rim
+      octx.strokeStyle = "#ffffff";
+      octx.lineWidth = 2;
+      octx.stroke();
+      // ₿ on the front face only; the back is a plain shaded disc
+      if (w > 0.12) {
+        octx.fillStyle = "#ffffff";
+        octx.font = `700 ${Math.round(R * 1.15)}px "Segoe UI Symbol", monospace`;
+        octx.textAlign = "center";
+        octx.textBaseline = "middle";
+        octx.fillText("₿", 0, 1);
+      }
+      octx.restore();
+
+      // 2) Ordered dither: luminance vs Bayer threshold -> green or black.
+      const img = octx.getImageData(0, 0, COIN_GRID, COIN_GRID);
+      const d = img.data;
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, size, size);
+      ctx.fillStyle = "#16c60c";
+      for (let y = 0; y < COIN_GRID; y++) {
+        for (let x = 0; x < COIN_GRID; x++) {
+          const lum = d[(y * COIN_GRID + x) * 4] / 255; // gray, so R channel is enough
+          const threshold = (BAYER4[y % 4][x % 4] + 0.5) / 16;
+          if (lum > threshold) {
+            ctx.fillRect(x * COIN_SCALE, y * COIN_SCALE, COIN_SCALE, COIN_SCALE);
+          }
+        }
+      }
+
+      if (!reduced) raf = requestAnimationFrame(draw);
+    };
+
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  return (
+    <canvas
+      ref={ref}
+      aria-hidden
+      className="mb-7"
+      style={{ width: COIN_GRID * COIN_SCALE, height: COIN_GRID * COIN_SCALE }}
+    />
+  );
+}
+
 // Same defaults the SimulationSetupModal uses: MAX speed, 30 days, daily ticks.
 const DEFAULT_START = { speed: 0.0, duration_days: 30, ticks_per_day: 1 };
 
@@ -106,6 +211,7 @@ export default function BootTerminal({ onLaunch }: { onLaunch: () => void }) {
     <div className="crt fixed inset-0 z-50 overflow-hidden bg-black">
       <div className="scanlines pointer-events-none absolute inset-0" />
       <div className="flex h-full flex-col justify-center px-6 py-8 md:px-16">
+        <DitheredCoin />
         <pre className="term-green whitespace-pre-wrap font-mono text-[13px] leading-relaxed md:text-sm">
           {rendered.join("\n")}
           {partial && `\n${partial}`}

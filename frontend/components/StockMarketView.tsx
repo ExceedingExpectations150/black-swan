@@ -229,8 +229,20 @@ export default function StockMarketView() {
     volRef.current.setData(bucketed.volumes);
     // Never fitContent(): stretching a handful of candles across the full
     // width produces giant blocks. Fixed barSpacing keeps candles thin and
-    // uniform (real-chart behavior); just keep the latest candle in view.
-    if (bucketed.candles.length > 0) chartRef.current.timeScale().scrollToRealTime();
+    // uniform (real-chart behavior). While the whole run still fits in the
+    // pane, pin the FIRST candle to the left edge so the tape grows
+    // rightward from the session open; once it overflows, follow the live
+    // edge like a real terminal.
+    if (bucketed.candles.length > 0) {
+      const ts = chartRef.current.timeScale();
+      const paneWidth = (containerRef.current?.clientWidth ?? 0) - 70; // price scale
+      const capacity = Math.max(10, Math.floor(paneWidth / 6)); // bars at 6px spacing
+      if (bucketed.candles.length <= capacity) {
+        ts.setVisibleLogicalRange({ from: -1, to: capacity });
+      } else {
+        ts.scrollToRealTime();
+      }
+    }
   }, [bucketed]);
 
   const hasData = bucketed.candles.length > 0;

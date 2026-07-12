@@ -98,16 +98,16 @@ export default function TimelineSlider() {
             onChange={handleSliderChange}
             className="absolute z-10 w-full h-full opacity-0 cursor-pointer"
           />
-          {/* Custom track styling */}
-          <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
-             <div 
+          {/* Custom track styling — square terminal rail, no rounded pill */}
+          <div className="w-full h-[3px] bg-white/10 overflow-hidden">
+             <div
                className="h-full bg-accent transition-all duration-75 ease-linear"
                style={{ width: `${(sliderValue / sliderMax) * 100}%` }}
              />
           </div>
-          {/* Custom thumb styling */}
-          <div 
-            className="absolute w-3 h-3 bg-white rounded-full shadow-[0_0_10px_rgba(255,255,255,0.5)] pointer-events-none transition-all duration-75 ease-linear -ml-1.5"
+          {/* Playhead — a thin vertical marker, not a glowing orb */}
+          <div
+            className="absolute h-3.5 w-[2px] bg-ink pointer-events-none transition-all duration-75 ease-linear -ml-px"
             style={{ left: `${(sliderValue / sliderMax) * 100}%` }}
           />
         </div>

@@ -94,13 +94,13 @@ export default function CompanyDetail() {
       />
       {/* drawer */}
       <aside
-        className="panel scroll-thin absolute right-0 top-0 h-screen w-[440px] max-w-[92vw] overflow-y-auto rounded-none border-l border-hair bg-black/85 backdrop-blur-md transition-transform duration-300 ease-out"
+        className="panel scroll-thin absolute right-0 top-0 h-screen w-[440px] max-w-[92vw] overflow-y-auto rounded-none border-l border-hair bg-[#080808] transition-transform duration-300 ease-out"
         style={{ transform: mounted ? "translateX(0)" : "translateX(100%)" }}
       >
         <button
           onClick={close}
           aria-label="Close"
-          className="absolute right-3 top-3 z-10 rounded-md p-1.5 text-ink2 transition-colors hover:bg-white/5 hover:text-ink"
+          className="absolute right-3 top-3 z-10 rounded-sm p-1.5 text-ink2 transition-colors hover:bg-white/5 hover:text-ink"
         >
           <X size={16} />
         </button>
@@ -116,7 +116,7 @@ export default function CompanyDetail() {
             {/* header */}
             <div className="flex items-start gap-3 pr-8">
               <div
-                className="tnum flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-sm font-semibold text-ink"
+                className="tnum flex h-11 w-11 shrink-0 items-center justify-center rounded-sm text-sm font-semibold text-ink"
                 style={{ background: "rgba(255,255,255,0.06)" }}
               >
                 {monogram(company.name)}
@@ -149,7 +149,7 @@ export default function CompanyDetail() {
                 {fmtPct(company.change_pct)}
               </span>
               {company.is_bankrupt && (
-                <span className="ml-auto flex items-center gap-1 rounded-md border border-down/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-down">
+                <span className="ml-auto flex items-center gap-1 rounded-sm border border-down/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-down">
                   <AlertTriangle size={11} /> Bankrupt
                 </span>
               )}
@@ -210,7 +210,7 @@ export default function CompanyDetail() {
                   {posts.map((post) => (
                     <li
                       key={post.post_id}
-                      className="rounded-md bg-white/[0.02] py-2 pl-3 pr-2.5"
+                      className="rounded-sm bg-white/[0.02] py-2 pl-3 pr-2.5"
                       style={{
                         borderLeft: `2px solid ${sentimentColor(post.sentiment)}`,
                       }}

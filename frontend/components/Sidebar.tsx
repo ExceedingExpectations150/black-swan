@@ -101,7 +101,7 @@ export default function Sidebar({
               <button
                 key={c.ticker}
                 onClick={() => setSelectedTicker(c.ticker)}
-                className="flex items-center justify-between rounded px-1.5 py-1.5 text-left hover:bg-white/[0.04]"
+                className="flex items-center justify-between rounded-sm px-1.5 py-1.5 text-left hover:bg-white/[0.04]"
               >
                 <div className="min-w-0 leading-none">
                   <div className="tnum text-xs text-ink">{c.ticker}</div>

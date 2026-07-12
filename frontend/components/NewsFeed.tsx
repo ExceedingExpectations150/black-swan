@@ -85,7 +85,7 @@ export default function NewsFeed() {
         {selectedTicker && (
           <button
             onClick={() => setSelectedTicker(null)}
-            className="flex items-center gap-1 rounded bg-white/[0.06] px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-ink2 transition hover:text-ink"
+            className="flex items-center gap-1 rounded-sm bg-white/[0.06] px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-ink2 transition hover:text-ink"
           >
             filtered: {selectedTicker}
             <X size={11} />
@@ -104,7 +104,7 @@ export default function NewsFeed() {
               const anchorTick = group.report?.tick_id ?? group.items[0]?.tick_id ?? 0;
               return (
                 <section key={group.key}>
-                  <div className="sticky top-0 z-10 flex items-center justify-between border-b border-hair bg-black/90 px-3 py-1.5 backdrop-blur">
+                  <div className="sticky top-0 z-10 flex items-center justify-between border-b border-hair bg-[#0a0a0a] px-3 py-1.5">
                     <span className="tnum text-[10px] font-semibold uppercase tracking-[0.16em] text-ink2">
                       {dayLabel(group.dayEpoch, ticksPerDay, anchorTick)}
                     </span>

@@ -32,7 +32,7 @@ export default function TopMovers() {
             <button
               key={t}
               onClick={() => setTab(t)}
-              className={`rounded px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] transition ${
+              className={`rounded-sm px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] transition ${
                 tab === t ? "bg-white/[0.06] text-ink" : "text-ink3 hover:text-ink2"
               }`}
             >

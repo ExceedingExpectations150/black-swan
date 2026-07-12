@@ -1,10 +1,9 @@
 "use client";
 
-// Stock Market view — trading-terminal styling: deep-blue gradient canvas,
-// green/red candlesticks bucketed from the real clearing-price series, blue
-// volume bars, and a glowing cyan trend line. All data is real (backfilled
-// from REST, kept live off the store); OHLC is aggregated from ticks, never
-// fabricated.
+// Stock Market view — trading-terminal styling: black canvas, green/red
+// candlesticks bucketed from the real clearing-price series, volume bars
+// underneath. All data is real (backfilled from REST, kept live off the
+// store); OHLC is aggregated from ticks, never fabricated.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -328,7 +327,7 @@ export default function StockMarketView() {
         </div>
       )}
 
-      <div className="relative flex-1 overflow-hidden rounded-lg">
+      <div className="relative flex-1 overflow-hidden rounded-sm">
         <div ref={containerRef} className="absolute inset-0" />
         {!hasData && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">

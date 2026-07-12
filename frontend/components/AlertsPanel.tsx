@@ -17,7 +17,7 @@ export default function AlertsPanel() {
         <div className="section-title flex items-center gap-2">
           Signals — Sharp Moves
           {alerts.filter(a => !a.read).length > 0 && (
-            <span className="bg-down/20 text-down px-2 py-0.5 rounded text-[10px]">
+            <span className="bg-down/20 text-down px-2 py-0.5 rounded-sm text-[10px]">
               {alerts.filter(a => !a.read).length} New
             </span>
           )}

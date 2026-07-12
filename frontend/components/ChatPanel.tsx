@@ -75,7 +75,7 @@ export default function ChatPanel() {
           <span className="section-title">Trading Desk</span>
         </div>
         {lastSource && (
-          <span className="flex items-center gap-1.5 rounded bg-white/[0.04] px-2 py-1 text-[9px] uppercase tracking-[0.16em] text-ink2">
+          <span className="flex items-center gap-1.5 rounded-sm bg-white/[0.04] px-2 py-1 text-[9px] uppercase tracking-[0.16em] text-ink2">
             <span
               className={`inline-block h-1.5 w-1.5 rounded-full ${
                 lastSource === "llm" ? "bg-up" : "bg-warn"
@@ -125,7 +125,7 @@ export default function ChatPanel() {
             )}
             {isPending && (
               <div className="flex justify-start">
-                <div className="flex items-center gap-1.5 rounded-md border border-hair bg-white/[0.02] px-3 py-2.5">
+                <div className="flex items-center gap-1.5 rounded-sm border border-hair bg-white/[0.02] px-3 py-2.5">
                   {[0, 150, 300].map((delay) => (
                     <span
                       key={delay}
@@ -151,13 +151,13 @@ export default function ChatPanel() {
           onChange={(e) => setDraft(e.target.value)}
           disabled={isPending}
           placeholder="Message the desk…"
-          className="min-w-0 flex-1 rounded-md border border-hair bg-white/[0.03] px-3 py-2 text-xs text-ink placeholder:text-ink3 outline-none transition focus:border-white/20 disabled:opacity-50"
+          className="min-w-0 flex-1 rounded-sm border border-hair bg-white/[0.03] px-3 py-2 text-xs text-ink placeholder:text-ink3 outline-none transition focus:border-white/20 disabled:opacity-50"
         />
         <button
           type="submit"
           disabled={isPending || !draft.trim()}
           aria-label="Send message"
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-hair bg-white/[0.05] text-ink2 transition hover:bg-white/[0.09] hover:text-ink disabled:opacity-40 disabled:hover:bg-white/[0.05] disabled:hover:text-ink2"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-sm border border-hair bg-white/[0.05] text-ink2 transition hover:bg-white/[0.09] hover:text-ink disabled:opacity-40 disabled:hover:bg-white/[0.05] disabled:hover:text-ink2"
         >
           <Send size={13} />
         </button>

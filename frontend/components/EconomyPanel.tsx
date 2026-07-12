@@ -114,7 +114,7 @@ export default function EconomyPanel() {
           {/* (d) MACRO NARRATIVE */}
           <section>
             <div className="mb-2 section-title">Macro Analyst</div>
-            <div className="rounded-md border border-hair bg-white/[0.02] p-3">
+            <div className="rounded-sm border border-hair bg-white/[0.02] p-3">
               {economy.narrative.trim() ? (
                 <p className="font-mono text-xs leading-relaxed text-ink2">
                   {economy.narrative}

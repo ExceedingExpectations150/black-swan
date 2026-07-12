@@ -100,9 +100,9 @@ export default function SimulationControls() {
   }
 
   return (
-    <div className="flex items-center gap-4 bg-white/[0.02] border border-hair rounded px-3 py-1.5 ml-4">
+    <div className="flex items-center gap-4 bg-white/[0.02] border border-hair rounded-sm px-3 py-1.5 ml-4">
       {/* Play/Pause/Stop */}
-      <div className="flex bg-white/5 rounded overflow-hidden">
+      <div className="flex bg-white/5 rounded-sm overflow-hidden">
         {isPaused ? (
           <button
             onClick={handleResume}
@@ -162,7 +162,7 @@ export default function SimulationControls() {
       {/* Speed Controls */}
       <div className="flex items-center gap-2 text-xs">
         <Gauge size={14} className="text-ink3" />
-        <div className="flex items-center bg-black rounded border border-hair overflow-hidden">
+        <div className="flex items-center bg-black rounded-sm border border-hair overflow-hidden">
           {[
             { label: "0.5x", val: 6.0 },
             { label: "1x", val: 3.0 },
@@ -193,14 +193,14 @@ export default function SimulationControls() {
           <button
             onClick={() => setDuration(7)}
             disabled={isLoading}
-            className="px-2 py-0.5 rounded border border-hair text-ink2 hover:text-ink1 hover:border-ink3 transition-colors"
+            className="px-2 py-0.5 rounded-sm border border-hair text-ink2 hover:text-ink1 hover:border-ink3 transition-colors"
           >
             1 Wk
           </button>
           <button
             onClick={() => setDuration(30)}
             disabled={isLoading}
-            className="px-2 py-0.5 rounded border border-hair text-ink2 hover:text-ink1 hover:border-ink3 transition-colors"
+            className="px-2 py-0.5 rounded-sm border border-hair text-ink2 hover:text-ink1 hover:border-ink3 transition-colors"
           >
             1 Mo
           </button>

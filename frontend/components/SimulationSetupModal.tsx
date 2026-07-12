@@ -36,12 +36,26 @@ export default function SimulationSetupModal() {
   const [config, setConfig] = useState<ComputeConfig | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [keyStatus, setKeyStatus] = useState<"idle" | "saving" | "ok" | "err">("idle");
+  const [launchError, setLaunchError] = useState<string | null>(null);
+  // This modal is never unmounted (it self-hides via shouldShow), so per-run
+  // state (config, key entry, key status) must be reset each time the setup
+  // screen reappears — otherwise a prior run's "key applied" state leaks into
+  // a fresh keyless run. An ignore flag drops stale out-of-order responses.
   useEffect(() => {
     if (!shouldShow) return;
+    setApiKey("");
+    setKeyStatus("idle");
+    setLaunchError(null);
+    let ignore = false;
     fetch(`${API_BASE}/api/config`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((c) => c && setConfig(c))
+      .then((c) => {
+        if (!ignore && c) setConfig(c);
+      })
       .catch(() => {});
+    return () => {
+      ignore = true;
+    };
   }, [shouldShow]);
 
   if (!shouldShow) return null;
@@ -69,18 +83,23 @@ export default function SimulationSetupModal() {
 
   const handleStart = async () => {
     setIsLoading(true);
+    setLaunchError(null);
     try {
       // Apply a runtime key first (if provided) so LLM prose is live for this run.
       await applyKey();
       if (scenario.trim()) {
+        // Best-effort: a failed event (e.g. rate-limited) shouldn't block launch.
         await fetch(`${API_BASE}/api/event`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ headline: scenario.trim() }),
-        });
+        }).catch(() => {});
       }
 
-      await fetch(`${API_BASE}/api/start`, {
+      // fetch() only rejects on network failure, not on 4xx/5xx — so check
+      // res.ok explicitly, otherwise a rejected start leaves the button
+      // spinning forever (the modal never unmounts because ticks never begin).
+      const res = await fetch(`${API_BASE}/api/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -89,8 +108,11 @@ export default function SimulationSetupModal() {
           ticks_per_day: ticksPerDay,
         }),
       });
+      if (!res.ok) throw new Error(`start ${res.status}`);
+      // Success: the first tick flips shouldShow false and unmounts this modal.
     } catch {
-      setIsLoading(false); // only reset on error. on success, tick > 0 will unmount it
+      setLaunchError("Couldn't start the simulation — is the backend running? Retry.");
+      setIsLoading(false);
     }
   };
 
@@ -268,6 +290,9 @@ export default function SimulationSetupModal() {
 
         {/* Footer */}
         <div className="p-4 border-t border-hair bg-white/[0.02]">
+          {launchError && (
+            <p className="mb-2 text-[11px] text-down">{launchError}</p>
+          )}
           <button
             onClick={handleStart}
             disabled={isLoading}

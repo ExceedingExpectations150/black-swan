@@ -127,6 +127,9 @@ EVENT_DIRECTION_SCALE: float = 0.08
 # impact on the forecast keeps fundamentals repriced.
 EVENT_DECAY_TICKS: float = 12.0
 EVENT_RESIDUAL_FRAC: float = 0.15
+# A company whose clearing price collapses below this fraction of its
+# real-market anchor is declared bankrupt (effectively wiped out).
+BANKRUPTCY_PRICE_FRACTION: float = 0.05
 # Institutional (TimesFM) conviction ladder: the 5 quant funds disperse their
 # limit prices between the current price and the forecast, so the smart-money
 # book actually crosses the behavioral crowd instead of stacking one-sided.
@@ -387,8 +390,12 @@ class TickEngine:
                 if tick_id % ANALYST_EVERY_N_TICKS == 0:
                     digest = self._economy_digest(snapshot)
                     try:
-                        narrative = await self.analyst.narrate(http, digest)
-                    except RuntimeError as exc:
+                        # Bounded like the other LLM call sites — a hung
+                        # connection must not stall the tick loop.
+                        narrative = await asyncio.wait_for(
+                            self.analyst.narrate(http, digest), timeout=15.0
+                        )
+                    except (RuntimeError, asyncio.TimeoutError) as exc:
                         logger.warning("macro analyst failed (tick %d): %s", tick_id, exc)
                         narrative = ""
                     if narrative:
@@ -1012,6 +1019,17 @@ class TickEngine:
                     o.status = OrderStatus.CANCELLED
 
             company.current_price = clearing_price
+            # Company bankruptcy: a collapse below BANKRUPTCY_PRICE_FRACTION of
+            # the real-market anchor is a wipe-out. Bankrupt names are excluded
+            # from the next tick (the tick query filters is_bankrupt) and feed
+            # the economy stress index's bankruptcy term.
+            if (
+                not company.is_bankrupt
+                and company.anchor_price > 0
+                and clearing_price <= company.anchor_price * BANKRUPTCY_PRICE_FRACTION
+            ):
+                company.is_bankrupt = True
+                logger.info("company bankrupt: %s at %.2f (tick %d)", company.ticker, clearing_price, tick_id)
             db.add(
                 PriceTick(
                     tick_id=tick_id,

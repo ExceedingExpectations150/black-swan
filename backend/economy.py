@@ -63,8 +63,14 @@ def _company_volatilities(db: Session) -> dict[str, float]:
         if len(prices) < MIN_PRICE_POINTS:
             out[ticker] = 0.0
             continue
-        returns = [(after - before) / before for before, after in zip(prices, prices[1:])]
-        out[ticker] = statistics.pstdev(returns)
+        # Guard against a zero prior price (skip that pair) — a single 0.0 tick
+        # would otherwise raise ZeroDivisionError and crash the whole tick.
+        returns = [
+            (after - before) / before
+            for before, after in zip(prices, prices[1:])
+            if before
+        ]
+        out[ticker] = statistics.pstdev(returns) if returns else 0.0
     return out
 
 

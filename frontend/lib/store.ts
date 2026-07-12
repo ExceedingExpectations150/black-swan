@@ -281,7 +281,14 @@ export const useStore = create<StoreState>((set) => ({
         if (band !== 0 && escalated) {
           candidates.push({ ticker: p.ticker, changePct: p.change_pct, price: p.price });
         }
-        bands[p.ticker] = band;
+        // Track the MOST-EXTREME band reached (not the last), so a price
+        // oscillating around a threshold (11%->9%->11%) fires once, not every
+        // re-cross. A direction flip resets to the new band.
+        if (band === 0 || Math.sign(band) !== Math.sign(prevBand)) {
+          bands[p.ticker] = band;
+        } else if (Math.abs(band) > Math.abs(prevBand)) {
+          bands[p.ticker] = band;
+        }
         // Single-copy append (a spread + slice per ticker per tick doubles
         // the allocation churn at 51 symbols/tick).
         const series = priceSeries[p.ticker] ?? [];
@@ -442,6 +449,10 @@ export const useStore = create<StoreState>((set) => ({
       }
       const snapshot = await res.json();
       set((s) => {
+        // Drop a stale/out-of-order response: if the user has since scrubbed
+        // to a different tick or released back to live (scrubbedTickId null),
+        // applying this snapshot would show the wrong tick's data.
+        if (s.scrubbedTickId !== tickId) return s;
         const companies = { ...s.companies };
         for (const c of snapshot.companies) companies[c.ticker] = c;
         return {
@@ -475,6 +486,7 @@ export const useStore = create<StoreState>((set) => ({
 
   resetWorld: () =>
     set({
+      companies: {},
       priceSeries: {},
       volumeSeries: {},
       social: [],

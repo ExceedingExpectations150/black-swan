@@ -44,16 +44,34 @@ and the crash emerges from panicked order flow.
 
 | Resource | What it does | Where it runs |
 |---|---|---|
-| **TimesFM 2.5 200M** (`google/timesfm-2.5-200m-pytorch`) | Per-ticker price forecasting for the institutional quant funds, every tick | **Locally via PyTorch** (CPU in the demo; the PyTorch path runs unmodified on AMD hardware/ROCm) |
+| **TimesFM 2.5 200M** (`google/timesfm-2.5-200m-pytorch`) | Per-ticker price forecasting for the institutional quant funds, every tick | **Locally via PyTorch** — CPU on this demo box (`torch+cpu`); runs on AMD Instinct/Radeon GPUs unmodified with the ROCm wheel (see AMD/ROCm below) |
 | **Gemini 2.5 Flash / Gemma** (Google Generative Language API) | News desk, corporate PR posts, macro analyst narrative, LLM cohort decisions | Hosted API (best-effort; keys in `backend/.env`, see `.env.example`) |
 | **Yahoo Finance** (`yfinance`) | Real anchor prices for the 51 seeded companies + real index strip (S&P/NASDAQ/DOW/FTSE/Nikkei) | Hosted API, unauthenticated |
 
 The simulation itself (matching engine, behavioral agents, economy) is pure
-Python — no external compute. **The compute-heavy AI component (TimesFM
-inference, batched across all 51 tickers in one forward pass every refresh
-cycle) is standard PyTorch with no CUDA-only code — it deploys unmodified
-on AMD Instinct/Radeon GPUs via ROCm.** Fireworks is not used; the only
-hosted AI dependency is the optional Google Generative Language API.
+Python — no external compute. Fireworks is not used; the only hosted AI
+dependency is the optional Google Generative Language API.
+
+### AMD / ROCm
+
+The compute-heavy AI component — TimesFM inference, batched across all 51
+tickers in one forward pass per refresh — is **standard PyTorch with no
+CUDA-only code** (no custom kernels, no triton/inductor). Device selection is
+device-agnostic: `backend/ai_clients.py` picks the accelerator via
+`torch.cuda.is_available()`, and **PyTorch's ROCm build surfaces AMD
+Instinct / Radeon GPUs through that same `torch.cuda` API** — so on an AMD box
+with the ROCm wheel, TimesFM runs on the AMD GPU with **zero code changes**:
+
+```bash
+# Swap the CPU wheel for the ROCm wheel; the code is unchanged.
+pip install torch --index-url https://download.pytorch.org/whl/rocm6.2
+```
+
+The resolved device is logged at startup (`TimesFM device=… backend=ROCm/HIP`)
+so you can confirm it landed on the GPU. On the demo machine here the
+installed wheel is `torch+cpu`, so inference runs on CPU (the portable
+fallback) — verified: `device=cpu, backend=CPU`. Nothing about the code is
+CPU- or NVIDIA-specific; the AMD path is the wheel, not a rewrite.
 
 **Zero-credential run:** the project is fully runnable with no API keys at
 all — TimesFM + the behavioral swarm drive the market, the newsroom files

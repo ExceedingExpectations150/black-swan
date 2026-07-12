@@ -141,9 +141,19 @@ class RateLimiter:
 _llm_rate_limiter = RateLimiter(max_calls=20, window_seconds=60.0)
 
 
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP. Behind a reverse proxy (Render/Cloudflare per
+    DEPLOY.md) request.client.host is the proxy's IP, which would collapse the
+    per-IP limiter into one shared global bucket; prefer the first
+    X-Forwarded-For hop so the limit stays per-user in production."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
 def _rate_limit_llm(request: Request) -> None:
-    client = request.client.host if request.client else "unknown"
-    _llm_rate_limiter.check(client)
+    _llm_rate_limiter.check(_client_ip(request))
 
 
 class ConnectionManager:
@@ -159,9 +169,14 @@ class ConnectionManager:
         allowed or the cap is reached; the caller then bails out.
         """
         origin = websocket.headers.get("origin")
-        # A same-origin browser always sends Origin; allow no-Origin clients
-        # (native ws tools, curl) only against a localhost-only allowlist.
-        if origin is not None and origin not in ALLOWED_ORIGINS:
+        # A same-origin browser always sends Origin. Accept a missing Origin
+        # (native ws tools) ONLY when the whole allowlist is localhost — in a
+        # public deployment an Origin-less client would otherwise bypass the
+        # allowlist entirely and scrape/flood the feed from anywhere.
+        allowed = (
+            origin in ALLOWED_ORIGINS if origin is not None else _LOCALHOST_ONLY
+        )
+        if not allowed:
             await websocket.close(code=1008)
             return False
         if len(self._clients) >= MAX_WS_CLIENTS:
@@ -402,6 +417,11 @@ _origins_env = os.getenv(
     "ALLOWED_ORIGINS", "http://localhost:5055,http://localhost:3000"
 )
 ALLOWED_ORIGINS = [o.strip() for o in _origins_env.split(",") if o.strip()]
+# True only when every allowed origin is loopback — gates the WS no-Origin
+# exception so it applies in local dev but never in a public deployment.
+_LOCALHOST_ONLY = bool(ALLOWED_ORIGINS) and all(
+    ("localhost" in o or "127.0.0.1" in o) for o in ALLOWED_ORIGINS
+)
 
 app.add_middleware(
     CORSMiddleware,

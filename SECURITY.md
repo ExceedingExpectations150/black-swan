@@ -36,8 +36,29 @@ and error-message leakage.
   or `NEXT_PUBLIC_*` env; `backend/.env` is gitignored and untracked.
 - **HTTP CORS** — `allow_origins` is an explicit localhost allowlist, not wildcard.
 
+## Final pre-public pass
+
+A second offensive review was run immediately before making the repo public.
+
+- **Git history secret scan — CLEAN.** `backend/.env` was never committed at
+  any point in history; no API key (`AIza…`, `sk-…`, `ghp_…`, PEM) appears in
+  any commit. The old `blackswan.db` blobs still reachable in history contain
+  only market-sim data (prices, agent state), not secrets — repo bloat, not a
+  leak. `.env.example` holds only empty placeholders. Safe to publish.
+- **9 (MEDIUM, fixed)** — the WebSocket accepted any client that omitted the
+  `Origin` header regardless of `ALLOWED_ORIGINS`, so a native (non-browser)
+  client could bypass the allowlist in a public deployment. Now a missing
+  Origin is accepted only when the allowlist is entirely localhost (dev);
+  public allowlists reject it.
+- **10 (LOW, fixed)** — behind a reverse proxy the per-IP rate limiter keyed on
+  `request.client.host` (the proxy IP), collapsing to one shared bucket. Now
+  reads the first `X-Forwarded-For` hop so the limit stays per-user.
+- **Hygiene** — agent-tooling artifacts (`.claude-flow/`, `.swarm/`, `.mcp.json`,
+  `CLAUDE.md.pre-ruflo`, machine-local skill symlinks) added to `.gitignore` so
+  they can never land in the public history.
+
 ## Residual risk
 
 Findings 7 and 8 are accepted for the hackathon's localhost demo model. Before
-any public deployment: provision two distinct Gemini keys and gate `/api/*`
-behind authentication.
+any public deployment: provision two distinct Gemini keys, gate `/api/*` behind
+authentication, and run uvicorn with `--proxy-headers` on trusted hosts.

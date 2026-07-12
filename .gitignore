@@ -3,6 +3,14 @@ __pycache__/
 *.pyc
 *.db
 .env
+.env.local
 
 # machine-local skill symlinks (Claude Code); real skills live in .agents/skills
 .claude/
+
+# agent-tooling artifacts — never belong in the repo (esp. once public)
+.claude-flow/
+.swarm/
+.mcp.json
+CLAUDE.md.pre-ruflo
+.agents/skills/terminal-ui/

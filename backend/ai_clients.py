@@ -137,8 +137,12 @@ class TimesFMForecaster:
     """Local TimesFM point forecaster for the institutional quant agents.
 
     Runs Google's TimesFM foundation model on PyTorch with a 512-tick context
-    window and 32-tick horizon, on CUDA when available (device selection is
-    automatic inside the timesfm torch module).
+    window and 32-tick horizon. Device selection is device-agnostic: it uses
+    the standard `torch.cuda` accelerator API, which the PyTorch ROCm build
+    surfaces for AMD Instinct / Radeon GPUs — so on an AMD box with the ROCm
+    wheel this runs on the AMD GPU with ZERO code changes (no CUDA-only
+    kernels, no triton/inductor). On a CPU-only wheel (e.g. this Windows demo
+    box, torch+cpu) it falls back to CPU. The resolved device is logged.
 
     Checkpoint note: PRD.md names `google/timesfm-2.0-500m`, which only the
     timesfm 1.x package (Python <= 3.11) can load. This machine runs Python
@@ -166,8 +170,17 @@ class TimesFMForecaster:
         import torch
         import timesfm
 
+        # `torch.cuda` is the accelerator API for BOTH NVIDIA CUDA and AMD
+        # ROCm builds; it returns True for an AMD GPU under the ROCm wheel.
         self.device: str = "cuda" if torch.cuda.is_available() else "cpu"
-        # torch_compile=False: inductor/triton are not available on Windows.
+        backend = "ROCm/HIP" if getattr(torch.version, "hip", None) else (
+            "CUDA" if getattr(torch.version, "cuda", None) else "CPU"
+        )
+        logger.info(
+            "TimesFM device=%s (torch %s, backend=%s)", self.device, torch.__version__, backend
+        )
+        # torch_compile=False: inductor/triton are not available on Windows and
+        # keeping it off avoids a triton dependency, aiding portability.
         self.tfm: timesfm.TimesFM_2p5_200M_torch = timesfm.TimesFM_2p5_200M_torch.from_pretrained(
             self.CHECKPOINT_REPO, torch_compile=False
         )

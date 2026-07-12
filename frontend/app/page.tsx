@@ -18,6 +18,7 @@ import AlertsPanel from "@/components/AlertsPanel";
 import ChatPanel from "@/components/ChatPanel";
 import TimelineSlider from "@/components/TimelineSlider";
 import SimulationSetupModal from "@/components/SimulationSetupModal";
+import BackendGate from "@/components/BackendGate";
 
 // react-simple-maps is client-only; skip SSR to avoid window/hydration issues.
 const WorldMap = dynamic(() => import("@/components/WorldMap"), {
@@ -29,7 +30,15 @@ const WorldMap = dynamic(() => import("@/components/WorldMap"), {
   ),
 });
 
-export default function Home() {
+export default function Page() {
+  return (
+    <BackendGate>
+      <Home />
+    </BackendGate>
+  );
+}
+
+function Home() {
   useLiveConnection();
   const [nav, setNav] = useState<NavKey>("dashboard");
   const [booted, setBooted] = useState(false);

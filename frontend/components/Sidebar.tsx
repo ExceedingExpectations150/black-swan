@@ -36,7 +36,9 @@ export default function Sidebar({
 }) {
   const companies = useStore((s) => s.companies);
   const watchlist = useStore((s) => s.watchlist);
-  const indices = useStore((s) => s.indices);
+  const realIndices = useStore((s) => s.indices);
+  const simIndices = useStore((s) => s.simIndices);
+  const indices = simIndices.length > 0 ? simIndices : realIndices;
   const connection = useStore((s) => s.connectionStatus);
   const setSelectedTicker = useStore((s) => s.setSelectedTicker);
 
@@ -82,7 +84,7 @@ export default function Sidebar({
         </div>
         <div className="mt-1 text-[11px] text-ink2">Global Markets — Live</div>
         <div className="mt-2 h-8">
-          <Sparkline data={globalSpark} up height={32} />
+          <Sparkline data={globalSpark} up={(indices[0]?.change_pct ?? 0) >= 0} height={32} />
         </div>
       </div>
 

@@ -6,7 +6,9 @@ import Sparkline from "@/components/Sparkline";
 
 // The backend feeds sector indices only — no fake asset-class tabs.
 export default function MarketOverview() {
-  const indices = useStore((s) => s.indices);
+  const realIndices = useStore((s) => s.indices);
+  const simIndices = useStore((s) => s.simIndices);
+  const indices = simIndices.length > 0 ? simIndices : realIndices;
 
   return (
     <div className="panel flex h-full flex-col">

@@ -21,7 +21,12 @@ function useUtcClock(): { time: string; date: string } {
 }
 
 export default function TopBar() {
-  const indices = useStore((s) => s.indices);
+  // Once the sim is producing ticks, the strip shows the SIM's own
+  // cap-weighted indices (they move every tick); before that, the static
+  // real-market anchors from /api/indices.
+  const realIndices = useStore((s) => s.indices);
+  const simIndices = useStore((s) => s.simIndices);
+  const indices = simIndices.length > 0 ? simIndices : realIndices;
   const companies = useCompanyList();
   const setSelectedTicker = useStore((s) => s.setSelectedTicker);
   const { time, date } = useUtcClock();

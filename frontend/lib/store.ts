@@ -21,6 +21,64 @@ import type {
 
 const PRICE_SERIES_CAP = 512;
 const SOCIAL_CAP = 100;
+const SIM_INDEX_SPARK_CAP = 64;
+const SIM_INDEX_SECTORS = 4; // composite + the N largest sectors by anchor cap
+
+// Cap-weighted sim indices: composite (base 10,000) + top sectors (base
+// 1,000), each valued as base x (sim cap / real-market anchor cap). Real
+// data only — every input is a clearing price from the matching engine.
+function computeSimIndices(
+  companies: Record<string, Company>,
+  prev: MarketIndex[],
+): MarketIndex[] {
+  const groups = new Map<string, { cur: number; anchor: number }>();
+  const bump = (key: string, cur: number, anchor: number) => {
+    const g = groups.get(key);
+    if (g) {
+      g.cur += cur;
+      g.anchor += anchor;
+    } else {
+      groups.set(key, { cur, anchor });
+    }
+  };
+  for (const c of Object.values(companies)) {
+    const cur = c.current_price * c.shares_outstanding;
+    const anchor = c.anchor_price * c.shares_outstanding;
+    if (anchor <= 0) continue;
+    bump("__composite__", cur, anchor);
+    bump(c.sector, cur, anchor);
+  }
+  const composite = groups.get("__composite__");
+  if (!composite) return [];
+  groups.delete("__composite__");
+  const topSectors = [...groups.entries()]
+    .sort((a, b) => b[1].anchor - a[1].anchor)
+    .slice(0, SIM_INDEX_SECTORS);
+  const prevSpark = new Map(prev.map((i) => [i.symbol, i.sparkline]));
+  const build = (symbol: string, name: string, base: number, g: { cur: number; anchor: number }): MarketIndex => {
+    const ratio = g.cur / g.anchor;
+    const value = base * ratio;
+    const spark = prevSpark.get(symbol) ?? [];
+    const sparkline =
+      spark.length >= SIM_INDEX_SPARK_CAP
+        ? [...spark.slice(1 - SIM_INDEX_SPARK_CAP), value]
+        : [...spark, value];
+    return {
+      symbol,
+      name,
+      value,
+      change: value - base,
+      change_pct: (ratio - 1) * 100,
+      sparkline,
+    };
+  };
+  return [
+    build("BSW", "BSW Composite", 10_000, composite),
+    ...topSectors.map(([sector, g]) =>
+      build(`BSW:${sector.slice(0, 4).toUpperCase()}`, sector, 1_000, g),
+    ),
+  ];
+}
 
 interface StoreState {
   companies: Record<string, Company>;
@@ -29,6 +87,10 @@ interface StoreState {
   social: SocialPostT[];
   economy: Economy | null;
   indices: MarketIndex[];
+  /** Live indices computed from SIM clearing prices (cap-weighted vs the
+   *  real-market anchor baseline). Empty until the first tick lands; the
+   *  UI shows the static real-market strip only while these are empty. */
+  simIndices: MarketIndex[];
   latestTickId: number;
   scrubbedTickId: number | null;
   news: string;
@@ -93,6 +155,7 @@ export const useStore = create<StoreState>((set) => ({
   social: [],
   economy: null,
   indices: [],
+  simIndices: [],
   latestTickId: 0,
   scrubbedTickId: null,
   news: "Awaiting market open...",
@@ -131,6 +194,7 @@ export const useStore = create<StoreState>((set) => ({
           latestTickId: snapshot.tick_id,
           priceSeries: {},
           volumeSeries: {},
+          simIndices: isFreshDB ? [] : computeSimIndices(companies, []),
           alerts: [],
           scrubbedTickId: null,
           simTime: null,
@@ -150,6 +214,7 @@ export const useStore = create<StoreState>((set) => ({
         news: "",
         tickId: snapshot.tick_id,
         latestTickId: isFreshDB ? 0 : Math.max(s.latestTickId, snapshot.tick_id),
+        simIndices: isFreshDB ? [] : computeSimIndices(companies, s.simIndices),
         isPaused: snapshot.paused ?? s.isPaused,
         tickInterval: snapshot.tick_interval_seconds ?? s.tickInterval,
         maxTicks: snapshot.max_ticks ?? s.maxTicks,
@@ -203,7 +268,13 @@ export const useStore = create<StoreState>((set) => ({
         trimmedVol.push({ t, v: p.volume });
         volumeSeries[p.ticker] = trimmedVol;
       }
-      return { companies, priceSeries, volumeSeries, tickId };
+      return {
+        companies,
+        priceSeries,
+        volumeSeries,
+        tickId,
+        simIndices: computeSimIndices(companies, s.simIndices),
+      };
     }),
 
   applyCompanyUpdate: (updates) =>
@@ -361,6 +432,7 @@ export const useStore = create<StoreState>((set) => ({
       news: "Awaiting market open...",
       tickId: 0,
       latestTickId: 0,
+      simIndices: [],
       scrubbedTickId: null,
       simTime: null,
       isPaused: false,

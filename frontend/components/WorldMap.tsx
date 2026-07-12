@@ -19,8 +19,24 @@ const MIN_RADIUS = 3.5;
 const MAX_RADIUS = 8;
 const VOLATILE_THRESHOLD = 0.03;
 const BANKRUPT_COLOR = "#5a5a5a";
-const NODE_UP = "#16c60c";
-const NODE_DOWN = "#ff4d4f";
+const NODE_UP = { r: 0x16, g: 0xc6, b: 0x0c }; // #16c60c
+const NODE_DOWN = { r: 0xff, g: 0x4d, b: 0x4f }; // #ff4d4f
+const NODE_FLAT = { r: 0x6b, g: 0x70, b: 0x6d }; // dim neutral for ~0%
+// change_pct at which the spectrum saturates to full green/red.
+const PERF_FULL_SCALE_PCT = 8;
+// Quantize the spectrum so microscopic per-tick moves don't produce a new
+// color string every tick (which would defeat MarkerNode's memo).
+const PERF_STEPS = 20;
+
+function perfColor(changePct: number): string {
+  const raw = Math.max(-1, Math.min(1, changePct / PERF_FULL_SCALE_PCT));
+  const t = Math.round(raw * PERF_STEPS) / PERF_STEPS;
+  const from = NODE_FLAT;
+  const to = t >= 0 ? NODE_UP : NODE_DOWN;
+  const k = Math.abs(t);
+  const mix = (a: number, b: number) => Math.round(a + (b - a) * k);
+  return `rgb(${mix(from.r, to.r)},${mix(from.g, to.g)},${mix(from.b, to.b)})`;
+}
 
 interface NodeDatum {
   company: Company;
@@ -222,12 +238,9 @@ export default function WorldMap() {
       return {
         company: c,
         radius,
-        // Session performance is the color channel: green up, red down.
-        color: c.is_bankrupt
-          ? BANKRUPT_COLOR
-          : c.change_pct >= 0
-            ? NODE_UP
-            : NODE_DOWN,
+        // Session performance is the color channel: a red->neutral->green
+        // spectrum scaled by how much the company has gained or lost.
+        color: c.is_bankrupt ? BANKRUPT_COLOR : perfColor(c.change_pct),
         pulse: !c.is_bankrupt && c.volatility > VOLATILE_THRESHOLD,
       };
     });

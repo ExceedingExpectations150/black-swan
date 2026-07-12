@@ -88,10 +88,17 @@ docker compose up --build
 ```
 
 Brings up both containers (FastAPI + TimesFM backend, Next.js terminal
-frontend), fully **keyless**. To enable LLM prose, export `GEMINI_API_KEY_PRIMARY`
-/ `GEMINI_API_KEY_BACKUP` before `up` (or uncomment the `env_file` line in
-`docker-compose.yml`). The first `/api/start` downloads the TimesFM checkpoint
-(~1 GB) into the persisted `hf-cache` volume, so it's slow once and fast after.
+frontend), fully **keyless**. The first `/api/start` downloads the TimesFM
+checkpoint (~1 GB) into the persisted `hf-cache` volume, so it's slow once and
+fast after.
+
+**Add your own key — no restart.** The setup console (the launch screen)
+shows a **Compute & AI** panel with the live inference device (CPU or AMD GPU)
+and LLM status. If you're keyless, paste a Gemini key there and it activates
+LLM-written news, PR posts, and desk chat for that run instantly (POSTed to
+`/api/config/gemini`, injected into the live model routers, never logged or
+persisted to disk). You can also set `GEMINI_API_KEY_PRIMARY` /
+`GEMINI_API_KEY_BACKUP` in the env / `docker-compose.yml` for a persistent key.
 
 **AMD GPU (ROCm):** the backend ships a second Dockerfile — `backend/Dockerfile.rocm`
 — identical except it installs the ROCm PyTorch wheel, so TimesFM runs on an

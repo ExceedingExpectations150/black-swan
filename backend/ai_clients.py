@@ -82,6 +82,21 @@ class GeminiModelRouter:
     def active_key_index(self) -> int:
         return self._key_index
 
+    @property
+    def is_active(self) -> bool:
+        """True once at least one API key is configured."""
+        return bool(self._keys)
+
+    def set_keys(self, keys: list[str]) -> None:
+        """Inject API keys into a LIVE router (runtime key entry, no restart).
+
+        Resets the rotation cursor and model so the next call starts on the
+        primary key/model. The key value is never logged by this class.
+        """
+        self._keys = [k for k in keys if k]
+        self._key_index = 0
+        self._model = PRIMARY_MODEL
+
     def _rotate_on_rate_limit(self) -> None:
         self._key_index = (self._key_index + 1) % len(self._keys)
         self._model = FALLBACK_MODEL

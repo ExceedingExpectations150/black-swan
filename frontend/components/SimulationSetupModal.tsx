@@ -1,9 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Play, Loader2, Calendar, Settings, Zap } from "lucide-react";
+import { Play, Loader2, Calendar, Settings, Zap, Cpu, KeyRound } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { API_BASE } from "@/lib/socket";
+
+interface ComputeConfig {
+  llm_active: boolean;
+  device: string;
+  compute_backend: string;
+}
 
 export default function SimulationSetupModal() {
   const latestTickId = useStore((s) => s.latestTickId);
@@ -26,11 +32,46 @@ export default function SimulationSetupModal() {
   const [ticksPerDay, setTicksPerDay] = useState(4);
   const [speed, setSpeed] = useState(0.0); // MAX default
 
+  // Compute device + LLM status (drives the AI section below).
+  const [config, setConfig] = useState<ComputeConfig | null>(null);
+  const [apiKey, setApiKey] = useState("");
+  const [keyStatus, setKeyStatus] = useState<"idle" | "saving" | "ok" | "err">("idle");
+  useEffect(() => {
+    if (!shouldShow) return;
+    fetch(`${API_BASE}/api/config`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((c) => c && setConfig(c))
+      .catch(() => {});
+  }, [shouldShow]);
+
   if (!shouldShow) return null;
+
+  const onGpu = config?.device === "cuda";
+  const llmOn = config?.llm_active || keyStatus === "ok";
+
+  const applyKey = async (): Promise<boolean> => {
+    const key = apiKey.trim();
+    if (!key) return true; // nothing to apply — keyless is fine
+    setKeyStatus("saving");
+    try {
+      const res = await fetch(`${API_BASE}/api/config/gemini`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ primary: key }),
+      });
+      setKeyStatus(res.ok ? "ok" : "err");
+      return res.ok;
+    } catch {
+      setKeyStatus("err");
+      return false;
+    }
+  };
 
   const handleStart = async () => {
     setIsLoading(true);
     try {
+      // Apply a runtime key first (if provided) so LLM prose is live for this run.
+      await applyKey();
       if (scenario.trim()) {
         await fetch(`${API_BASE}/api/event`, {
           method: "POST",
@@ -38,7 +79,7 @@ export default function SimulationSetupModal() {
           body: JSON.stringify({ headline: scenario.trim() }),
         });
       }
-      
+
       await fetch(`${API_BASE}/api/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -160,6 +201,67 @@ export default function SimulationSetupModal() {
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* Compute & AI: device readout + optional runtime API key */}
+          <div className="flex flex-col gap-2 border-t border-hair pt-4">
+            <label className="text-xs text-ink2 flex items-center gap-1.5">
+              <Cpu size={14} /> Compute &amp; AI
+            </label>
+            <div className="flex items-center justify-between rounded-sm border border-hair bg-black px-3 py-2 text-[11px]">
+              <span className="text-ink3">
+                Inference:{" "}
+                <span className={onGpu ? "text-accent" : "text-ink2"}>
+                  {config ? (onGpu ? `AMD GPU · ${config.compute_backend}` : "CPU") : "…"}
+                </span>
+              </span>
+              <span className="text-ink3">
+                LLM:{" "}
+                <span className={llmOn ? "text-up" : "text-warn"}>
+                  {llmOn ? "active" : "keyless (factual)"}
+                </span>
+              </span>
+            </div>
+            {!onGpu && (
+              <p className="text-[10px] text-ink3 leading-relaxed">
+                Running on CPU. For GPU-accelerated TimesFM, launch the AMD ROCm
+                container (<span className="font-mono">Dockerfile.rocm</span>) — see README.
+              </p>
+            )}
+            {!llmOn && (
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1">
+                  <KeyRound
+                    size={13}
+                    className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink3"
+                  />
+                  <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => {
+                      setApiKey(e.target.value);
+                      if (keyStatus !== "idle") setKeyStatus("idle");
+                    }}
+                    placeholder="Optional: paste a Gemini API key for LLM news & chat"
+                    className="w-full bg-black border border-hair rounded-sm pl-8 pr-3 py-2 text-xs text-white placeholder-ink3 focus:outline-none focus:border-accent"
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                </div>
+                {apiKey.trim() && (
+                  <button
+                    onClick={applyKey}
+                    disabled={keyStatus === "saving"}
+                    className="shrink-0 rounded-sm border border-hair px-2.5 py-2 text-[11px] text-ink2 hover:text-ink hover:border-ink3 transition-colors disabled:opacity-50"
+                  >
+                    {keyStatus === "saving" ? "…" : keyStatus === "err" ? "Retry" : "Apply"}
+                  </button>
+                )}
+              </div>
+            )}
+            {keyStatus === "err" && (
+              <p className="text-[10px] text-down">Couldn&apos;t reach the backend to set the key.</p>
+            )}
           </div>
 
         </div>

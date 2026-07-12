@@ -5,6 +5,7 @@ import {
   ComposableMap,
   Geographies,
   Geography,
+  Graticule,
   Marker,
   ZoomableGroup,
 } from "react-simple-maps";
@@ -18,7 +19,8 @@ const MIN_RADIUS = 3.5;
 const MAX_RADIUS = 8;
 const VOLATILE_THRESHOLD = 0.03;
 const BANKRUPT_COLOR = "#5a5a5a";
-const NODE_GREEN = "#16c60c";
+const NODE_UP = "#16c60c";
+const NODE_DOWN = "#ff4d4f";
 
 interface NodeDatum {
   company: Company;
@@ -47,12 +49,12 @@ function MarkerNodeBase({
   // Small flat square; faint market-cap size cue, kept tiny.
   const side = Math.max(3, radius * 0.7);
 
-  // White logo-style pill, offset up-right of the node.
+  // Terminal-dark chip, offset up-right of the node.
   const dx = side + 8;
   const dy = -(side + 11);
   const chipH = 17;
   const padL = 17;
-  const chipW = padL + 8 + company.name.length * 6.1;
+  const chipW = padL + 10 + company.name.length * 6.1;
 
   return (
     <Marker
@@ -63,7 +65,25 @@ function MarkerNodeBase({
       style={{ default: { cursor: "pointer" }, hover: { cursor: "pointer" }, pressed: {} }}
     >
       <g opacity={groupOpacity}>
-        {/* Small flat green square (no glow) */}
+        {/* Soft halo (two layered squares — no SVG filters, stays cheap x51) */}
+        <rect
+          x={-side * 1.6}
+          y={-side * 1.6}
+          width={side * 3.2}
+          height={side * 3.2}
+          fill={color}
+          opacity={0.07}
+          style={{ pointerEvents: "none" }}
+        />
+        <rect
+          x={-side}
+          y={-side}
+          width={side * 2}
+          height={side * 2}
+          fill={color}
+          opacity={0.16}
+          style={{ pointerEvents: "none" }}
+        />
         <rect
           className={pulse ? "node-pulse" : undefined}
           x={-side / 2}
@@ -71,8 +91,8 @@ function MarkerNodeBase({
           width={side}
           height={side}
           fill={color}
-          stroke={selected ? "#ffffff" : "none"}
-          strokeWidth={selected ? 1.2 : 0}
+          stroke={selected ? "#ffffff" : "rgba(0,0,0,0.55)"}
+          strokeWidth={selected ? 1.2 : 0.5}
           style={{ pointerEvents: "none" }}
         />
 
@@ -83,20 +103,28 @@ function MarkerNodeBase({
               y1={0}
               x2={dx}
               y2={dy + chipH / 2}
-              stroke="rgba(255,255,255,0.35)"
+              stroke="rgba(255,255,255,0.3)"
               strokeWidth={0.6}
               style={{ pointerEvents: "none" }}
             />
             <g transform={`translate(${dx}, ${dy})`} style={{ pointerEvents: "none" }}>
-              <rect width={chipW} height={chipH} rx={4} fill="#f5f5f5" />
-              <circle cx={9} cy={chipH / 2} r={4} fill={color} />
+              <rect
+                width={chipW}
+                height={chipH}
+                rx={2}
+                fill="rgba(8,8,8,0.94)"
+                stroke="rgba(255,255,255,0.18)"
+                strokeWidth={0.6}
+              />
+              <circle cx={10} cy={chipH / 2} r={2.5} fill={color} />
               <text
                 x={padL}
                 y={chipH / 2 + 3.2}
-                fontSize={10}
+                fontSize={9.5}
                 fontWeight={600}
-                fill="#0a0a0a"
+                fill="#f5f5f5"
                 fontFamily="var(--font-display)"
+                letterSpacing="0.04em"
               >
                 {company.name}
               </text>
@@ -194,7 +222,12 @@ export default function WorldMap() {
       return {
         company: c,
         radius,
-        color: c.is_bankrupt ? BANKRUPT_COLOR : NODE_GREEN,
+        // Session performance is the color channel: green up, red down.
+        color: c.is_bankrupt
+          ? BANKRUPT_COLOR
+          : c.change_pct >= 0
+            ? NODE_UP
+            : NODE_DOWN,
         pulse: !c.is_bankrupt && c.volatility > VOLATILE_THRESHOLD,
       };
     });
@@ -228,6 +261,9 @@ export default function WorldMap() {
               [size.w * 1.6, size.h * 1.6],
             ]}
           >
+          {/* Faint lat/lon grid: cartographic depth without visual noise. */}
+          <Graticule stroke="rgba(255,255,255,0.035)" strokeWidth={0.4} step={[20, 20]} />
+
           <Geographies geography={GEO_URL}>
             {({ geographies }) =>
               geographies
@@ -238,21 +274,26 @@ export default function WorldMap() {
                     geography={geo}
                     style={{
                       default: {
-                        fill: "#080808",
-                        stroke: "var(--map-stroke)",
-                        strokeWidth: 0.5,
+                        fill: "#111312",
+                        stroke: "rgba(255,255,255,0.26)",
+                        strokeWidth: 0.4,
+                        // Hairlines stay crisp at any zoom level instead of
+                        // fattening as the user zooms in.
+                        vectorEffect: "non-scaling-stroke",
                         outline: "none",
                       },
                       hover: {
-                        fill: "rgba(255,255,255,0.09)",
-                        stroke: "rgba(255,255,255,0.5)",
-                        strokeWidth: 0.75,
+                        fill: "rgba(255,255,255,0.06)",
+                        stroke: "rgba(255,255,255,0.45)",
+                        strokeWidth: 0.6,
+                        vectorEffect: "non-scaling-stroke",
                         outline: "none",
                       },
                       pressed: {
-                        fill: "rgba(255,255,255,0.14)",
-                        stroke: "rgba(255,255,255,0.6)",
-                        strokeWidth: 0.75,
+                        fill: "rgba(255,255,255,0.1)",
+                        stroke: "rgba(255,255,255,0.55)",
+                        strokeWidth: 0.6,
+                        vectorEffect: "non-scaling-stroke",
                         outline: "none",
                       },
                     }}

@@ -13,6 +13,7 @@ and persists whatever it wants.
 from __future__ import annotations
 
 import asyncio
+import re
 import statistics
 from dataclasses import dataclass
 from typing import Final
@@ -37,7 +38,6 @@ CONTEXT_MESSAGES: Final[int] = 8
 # Hard ceiling on one LLM answer before degrading to the offline brief.
 ANSWER_TIMEOUT_SECONDS: Final[float] = 20.0
 
-OFFLINE_NOTE: Final[str] = "Desk model offline — raw statistical read:"
 
 
 @dataclass(frozen=True)
@@ -175,9 +175,87 @@ def _brief_lines(brief: MarketBrief) -> list[str]:
     return lines
 
 
-def render_offline_brief(brief: MarketBrief) -> str:
-    """Deterministic statistical brief — the LLM-down path. Real numbers only."""
-    return "\n".join([OFFLINE_NOTE, *_brief_lines(brief)])
+def _read_direction(momentum_pct: float, forecast_delta_pct: float | None) -> str:
+    """A probabilistic lean from momentum + (optional) TimesFM forecast."""
+    signal = momentum_pct + (forecast_delta_pct or 0.0)
+    if signal > 0.6:
+        return "leans higher"
+    if signal < -0.6:
+        return "leans lower"
+    return "looks range-bound"
+
+
+def _focus_ticker(brief: MarketBrief, messages: list[ChatMessage] | None) -> TickerStat | None:
+    """If the user named a ticker in their last turn, return its stat.
+
+    Matches whole tokens only — a substring check would fire 'V' (Visa) inside
+    the word 'move'. Tickers may contain dots (2222.SR), so tokens keep dots.
+    """
+    if not messages:
+        return None
+    tokens = set(re.findall(r"[A-Z0-9.]+", messages[-1].content.upper()))
+    for s in brief.stats:
+        if s.ticker in tokens:
+            return s
+    return None
+
+
+def render_offline_brief(
+    brief: MarketBrief, messages: list[ChatMessage] | None = None
+) -> str:
+    """Senior-desk answer built from real numbers when the LLM is unavailable.
+
+    Reads like the desk talking — a calm, probabilistic market read grounded
+    entirely in the brief's figures — not a raw stats dump. Question-aware:
+    if the user named a ticker, the desk leads with that name.
+    """
+    if brief.stress_index >= 0.6:
+        tone = "Risk is elevated here — stress gauges are running hot"
+    elif brief.stress_index >= 0.3:
+        tone = "Conditions are choppy but contained"
+    else:
+        tone = "The tape is calm"
+    tone += f" (stress {brief.stress_index:.2f}"
+    tone += f", {brief.bankrupt_count} names in bankruptcy)." if brief.bankrupt_count else ")."
+
+    focus = _focus_ticker(brief, messages)
+    if focus is not None:
+        lean = _read_direction(focus.momentum_pct, focus.forecast_delta_pct)
+        if focus.forecast_delta_pct is not None:
+            call = (
+                f"TimesFM has it at ${focus.forecast:.2f} next tick "
+                f"({focus.forecast_delta_pct:+.2f}%), so it {lean}."
+            )
+        else:
+            call = f"On the numbers it {lean}."
+        return (
+            f"{tone} On {focus.ticker}: last ${focus.last_price:.2f}, "
+            f"{focus.change_pct:+.2f}% versus its anchor with {focus.momentum_pct:+.2f}% "
+            f"of near-term momentum. {call} "
+            "I'd frame that as a probabilistic tilt, not a certainty — size accordingly."
+        )
+
+    up = ", ".join(
+        f"{s.ticker} ({s.momentum_pct:+.2f}%)" for s in brief.gainers[:MOVERS_COUNT]
+    )
+    down = ", ".join(
+        f"{s.ticker} ({s.momentum_pct:+.2f}%)" for s in brief.losers[:MOVERS_COUNT]
+    )
+    forecasted = [s for s in brief.stats if s.forecast_delta_pct is not None]
+    if forecasted:
+        best = max(forecasted, key=lambda s: s.forecast_delta_pct or 0.0)
+        worst = min(forecasted, key=lambda s: s.forecast_delta_pct or 0.0)
+        model = (
+            f" The model's most constructive on {best.ticker} "
+            f"({best.forecast_delta_pct:+.2f}% next tick) and most cautious on "
+            f"{worst.ticker} ({worst.forecast_delta_pct:+.2f}%)."
+        )
+    else:
+        model = " No model forecasts have landed yet this run."
+    return (
+        f"{tone} Momentum is with {up}, while {down} are the ones under "
+        f"pressure.{model} Read it as a lean, not a lock — the crowd can turn fast."
+    )
 
 
 class SeniorTraderAgent:
@@ -223,8 +301,8 @@ class SeniorTraderAgent:
                 timeout=ANSWER_TIMEOUT_SECONDS,
             )
         except Exception:
-            return render_offline_brief(brief), "offline"
+            return render_offline_brief(brief, messages), "offline"
         reply = _extract_last_paragraph(raw)
         if not reply:
-            return render_offline_brief(brief), "offline"
+            return render_offline_brief(brief, messages), "offline"
         return reply, "llm"

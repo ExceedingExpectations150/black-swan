@@ -24,6 +24,19 @@ const SOCIAL_CAP = 100;
 const SIM_INDEX_SPARK_CAP = 64;
 const SIM_INDEX_SECTORS = 4; // composite + the N largest sectors by anchor cap
 
+// Move-alert thresholds (|% vs anchor|). Each is a "band"; an alert fires when
+// a ticker crosses into a MORE extreme band than it last alerted at, so a
+// stock sliding -5% -> -10% -> -15% raises three escalating signals, not spam.
+const ALERT_BANDS = [5, 10, 15, 20];
+const MAX_ALERTS_PER_TICK = 6; // on a market-wide shock, keep only the sharpest
+
+function moveBand(changePct: number): number {
+  const mag = Math.abs(changePct);
+  let lvl = 0;
+  for (let i = 0; i < ALERT_BANDS.length; i++) if (mag >= ALERT_BANDS[i]) lvl = i + 1;
+  return changePct >= 0 ? lvl : -lvl;
+}
+
 // Cap-weighted sim indices: composite (base 10,000) + top sectors (base
 // 1,000), each valued as base x (sim cap / real-market anchor cap). Real
 // data only — every input is a clearing price from the matching engine.
@@ -106,6 +119,8 @@ interface StoreState {
   maxTicks: number | null;
   durationDays: number | null;
   ticksPerDay: number | null;
+  /** Most-extreme signed move band already alerted per ticker (dedup). */
+  alertBands: Record<string, number>;
   /** Headline armed at the boot terminal — prefills the setup console. */
   armedEvent: string;
   /** Current simulated time (epoch seconds) — advances with the sim clock. */
@@ -171,6 +186,7 @@ export const useStore = create<StoreState>((set) => ({
   maxTicks: null,
   durationDays: null,
   ticksPerDay: null,
+  alertBands: {},
   armedEvent: "",
   simTime: null,
 
@@ -196,6 +212,7 @@ export const useStore = create<StoreState>((set) => ({
           volumeSeries: {},
           simIndices: isFreshDB ? [] : computeSimIndices(companies, []),
           alerts: [],
+          alertBands: {},
           scrubbedTickId: null,
           simTime: null,
           isPaused: snapshot.paused ?? false,
@@ -244,6 +261,9 @@ export const useStore = create<StoreState>((set) => ({
       const companies = { ...s.companies };
       const priceSeries = { ...s.priceSeries };
       const volumeSeries = { ...s.volumeSeries };
+      const bands = { ...s.alertBands };
+      const nowIso = new Date().toISOString();
+      const candidates: { ticker: string; changePct: number; price: number }[] = [];
       for (const p of prices) {
         const existing = companies[p.ticker];
         if (existing) {
@@ -254,6 +274,14 @@ export const useStore = create<StoreState>((set) => ({
             market_cap: p.price * existing.shares_outstanding,
           };
         }
+        // Signal-alert bookkeeping: fire only on crossing to a more extreme band.
+        const band = moveBand(p.change_pct);
+        const prevBand = bands[p.ticker] ?? 0;
+        const escalated = band > 0 ? band > prevBand : band < prevBand;
+        if (band !== 0 && escalated) {
+          candidates.push({ ticker: p.ticker, changePct: p.change_pct, price: p.price });
+        }
+        bands[p.ticker] = band;
         // Single-copy append (a spread + slice per ticker per tick doubles
         // the allocation churn at 51 symbols/tick).
         const series = priceSeries[p.ticker] ?? [];
@@ -268,11 +296,34 @@ export const useStore = create<StoreState>((set) => ({
         trimmedVol.push({ t, v: p.volume });
         volumeSeries[p.ticker] = trimmedVol;
       }
+
+      // Turn the sharpest fresh crossings into alerts (cap so a market-wide
+      // shock doesn't dump 51 at once).
+      const fresh: Alert[] = candidates
+        .sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct))
+        .slice(0, MAX_ALERTS_PER_TICK)
+        .map(({ ticker, changePct, price }) => {
+          const name = companies[ticker]?.name ?? ticker;
+          const dir = changePct >= 0 ? "up" : "down";
+          const mag = Math.abs(changePct);
+          return {
+            id: `${ticker}-${tickId}-${Math.round(changePct)}`,
+            tick_id: tickId,
+            ts: nowIso,
+            severity: mag >= 15 ? "critical" : "warning",
+            title: `${ticker} ${dir} ${mag.toFixed(1)}%`,
+            message: `${name} is ${dir} ${mag.toFixed(1)}% vs its anchor, trading at $${price.toLocaleString(undefined, { maximumFractionDigits: 2 })}.`,
+            read: false,
+          } as Alert;
+        });
+
       return {
         companies,
         priceSeries,
         volumeSeries,
         tickId,
+        alertBands: bands,
+        alerts: fresh.length > 0 ? [...fresh, ...s.alerts].slice(0, 100) : s.alerts,
         simIndices: computeSimIndices(companies, s.simIndices),
       };
     }),
@@ -429,6 +480,7 @@ export const useStore = create<StoreState>((set) => ({
       social: [],
       economy: null,
       alerts: [],
+      alertBands: {},
       news: "Awaiting market open...",
       tickId: 0,
       latestTickId: 0,

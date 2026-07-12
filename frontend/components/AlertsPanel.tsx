@@ -15,7 +15,7 @@ export default function AlertsPanel() {
     <div className="panel flex min-h-0 flex-1 flex-col p-4">
       <div className="flex items-center justify-between pb-3 border-b border-hair">
         <div className="section-title flex items-center gap-2">
-          Alerts
+          Signals — Sharp Moves
           {alerts.filter(a => !a.read).length > 0 && (
             <span className="bg-down/20 text-down px-2 py-0.5 rounded text-[10px]">
               {alerts.filter(a => !a.read).length} New
@@ -35,8 +35,12 @@ export default function AlertsPanel() {
 
       <div className="flex-1 overflow-y-auto mt-3 pr-2 space-y-2 scroll-thin">
         {alerts.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-xs text-ink3 tracking-widest uppercase">
-            No active alerts.
+          <div className="flex h-full flex-col items-center justify-center gap-1.5 text-center">
+            <div className="text-xs text-ink3 tracking-widest uppercase">No signals yet</div>
+            <div className="text-[11px] text-ink3/70 max-w-[240px]">
+              Fires when a stock crosses ±5 / 10 / 15% versus its anchor, or a
+              company goes bankrupt.
+            </div>
           </div>
         ) : (
           alerts.map((alert) => (

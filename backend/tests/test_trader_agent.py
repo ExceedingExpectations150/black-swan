@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from trader_agent import (
     ChatMessage,
-    OFFLINE_NOTE,
     SeniorTraderAgent,
     TickerStat,
     build_market_brief,
@@ -115,7 +114,27 @@ def test_build_market_brief_top3_each_way():
     assert len(brief.stats) == 7
 
 
-def test_render_offline_brief_is_factual():
+def test_render_offline_brief_focus_is_factual():
+    # When the user names a ticker, the desk leads with it and cites ONLY its
+    # real figures (price, anchor divergence, momentum, TimesFM forecast).
+    stats = compute_ticker_stats(
+        histories={"AAPL": HISTORY},
+        companies={"AAPL": {"current_price": 108.0, "anchor_price": 100.0}},
+        forecasts={"AAPL": 113.4},
+    )
+    brief = build_market_brief(stats, stress_index=0.42, bankrupt_count=1)
+    text = render_offline_brief(brief, [ChatMessage(role="user", content="read on AAPL?")])
+    assert "AAPL" in text, text
+    assert "$108.00" in text, text            # last price
+    assert "+8.00%" in text, text             # vs anchor
+    assert "+5.88%" in text, text             # momentum over last 5 points
+    assert "$113.40" in text and "+5.00%" in text, text   # TimesFM forecast
+    assert "0.42" in text, text               # stress index
+    assert "leans higher" in text, text       # positive momentum + forecast
+
+
+def test_render_offline_brief_market_read_is_conversational():
+    # With no named ticker, it gives a market-wide read — prose, not a dump.
     stats = compute_ticker_stats(
         histories={"AAPL": HISTORY},
         companies={"AAPL": {"current_price": 108.0, "anchor_price": 100.0}},
@@ -123,14 +142,9 @@ def test_render_offline_brief_is_factual():
     )
     brief = build_market_brief(stats, stress_index=0.42, bankrupt_count=1)
     text = render_offline_brief(brief)
-    assert text.startswith(OFFLINE_NOTE), text
-    assert "AAPL" in text, text
-    assert "$108.00" in text, text
-    assert "+5.88%" in text, text            # momentum over last 5 points
-    assert "+8.00%" in text, text            # vs anchor
-    assert f"{statistics.pstdev(HAND_RETURNS):.4f}" in text, text
-    assert "$113.40" in text and "+5.00%" in text, text
-    assert "0.42" in text and "bankruptcies: 1" in text, text
+    assert "AAPL" in text and "+5.88%" in text, text
+    assert "0.42" in text, text
+    assert "\n" not in text, "should read as prose, not a line-by-line dump"
 
 
 def test_answer_offline_on_router_failure():
@@ -144,7 +158,7 @@ def test_answer_offline_on_router_failure():
     messages = [ChatMessage(role="user", content="What looks likely to rise?")]
     reply, source = asyncio.run(agent.answer(None, messages, brief))
     assert source == "offline", source
-    assert reply == render_offline_brief(brief), reply
+    assert reply == render_offline_brief(brief, messages), reply
 
 
 def test_answer_llm_on_working_router():
@@ -177,7 +191,8 @@ if __name__ == "__main__":
     test_compute_ticker_stats_math()
     test_compute_ticker_stats_short_histories_and_no_forecast()
     test_build_market_brief_top3_each_way()
-    test_render_offline_brief_is_factual()
+    test_render_offline_brief_focus_is_factual()
+    test_render_offline_brief_market_read_is_conversational()
     test_answer_offline_on_router_failure()
     test_answer_llm_on_working_router()
     print("ALL TRADER AGENT TESTS PASSED")

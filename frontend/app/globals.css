@@ -13,6 +13,8 @@
   --text-3: #5a5a5a;
   --up: #16c60c;
   --down: #ff4d4f;
+  --accent: #22e06a; /* terminal green — sim state, live controls */
+  --warn: #f5a623; /* degraded / offline / replay */
   --map-stroke: rgba(255, 255, 255, 0.18);
   --arc: rgba(255, 255, 255, 0.12);
 }
@@ -33,7 +35,12 @@ body {
 .panel {
   background: var(--panel);
   border: 1px solid var(--panel-border);
-  border-radius: 10px;
+  border-radius: 3px; /* sharp workstation chrome, not web-app cards */
+}
+
+:focus-visible {
+  outline: 1px solid rgba(34, 224, 106, 0.6);
+  outline-offset: 1px;
 }
 
 .section-title {
@@ -159,4 +166,13 @@ body {
   inset: 0;
   pointer-events: none;
   background: radial-gradient(ellipse at center, transparent 55%, rgba(0, 0, 0, 0.55) 100%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .node-pulse,
+  .live-dot,
+  .post-enter,
+  .term-cursor {
+    animation: none;
+  }
 }

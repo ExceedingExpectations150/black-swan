@@ -76,7 +76,10 @@ export interface MarketIndex {
 }
 
 export interface PricePoint {
+  /** Simulated time, epoch seconds — drives real time axes on charts. */
   t: number;
+  /** Simulation tick ordinal (kept for tick-based views/scrubbing). */
+  tick?: number;
   price: number;
   volume?: number;
 }
@@ -113,6 +116,13 @@ export interface StateSnapshot {
   economy: Economy;
   social: SocialPostT[];
   tick_id: number;
+  // Sim-status fields are not returned by GET /api/state today (they arrive
+  // via the sim_status WS event), so they are optional here.
+  paused?: boolean;
+  tick_interval_seconds?: number;
+  max_ticks?: number | null;
+  duration_days?: number | null;
+  ticks_per_day?: number | null;
 }
 
 export type ConnectionStatus = "connecting" | "open" | "closed";

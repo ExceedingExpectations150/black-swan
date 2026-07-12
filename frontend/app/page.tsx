@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import { useLiveConnection } from "@/lib/socket";
 import { useStore, useCompanyList } from "@/lib/store";
 import TopBar from "@/components/TopBar";
-import Sidebar, { type NavKey } from "@/components/Sidebar";
+import StatusBar from "@/components/StatusBar";
+import Sidebar, { type NavKey, NAV } from "@/components/Sidebar";
 import MarketOverview from "@/components/MarketOverview";
 import TopMovers from "@/components/TopMovers";
 import NewsFeed from "@/components/NewsFeed";
@@ -14,6 +15,7 @@ import CompanyDetail from "@/components/CompanyDetail";
 import StockMarketView from "@/components/StockMarketView";
 import BootTerminal from "@/components/BootTerminal";
 import AlertsPanel from "@/components/AlertsPanel";
+import ChatPanel from "@/components/ChatPanel";
 import TimelineSlider from "@/components/TimelineSlider";
 import SimulationSetupModal from "@/components/SimulationSetupModal";
 
@@ -33,6 +35,19 @@ export default function Home() {
   const [booted, setBooted] = useState(false);
   const news = useStore((s) => s.news);
 
+  // Workstation keyboard nav: digits 1-7 switch views unless typing in a field.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+      const idx = Number(e.key) - 1;
+      if (idx >= 0 && idx < NAV.length) setNav(NAV[idx].key);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   if (!booted) {
     return <BootTerminal onLaunch={() => setBooted(true)} />;
   }
@@ -44,8 +59,8 @@ export default function Home() {
         <Sidebar active={nav} onNavigate={setNav} />
         <main className="flex min-w-0 flex-1 flex-col gap-3 p-3">
           {news && (
-            <div className="shrink-0 rounded-md border border-hair bg-white/[0.03] px-3 py-1.5 text-[11px] text-ink2">
-              <span className="mr-2 text-[9px] uppercase tracking-[0.2em] text-down">
+            <div className="shrink-0 rounded-sm border border-hair bg-white/[0.03] px-3 py-1.5 text-[11px] text-ink2">
+              <span className="mr-2 text-[9px] font-semibold uppercase tracking-[0.2em] text-down">
                 Macro
               </span>
               {news}
@@ -56,6 +71,7 @@ export default function Home() {
       </div>
       <CompanyDetail />
       <TimelineSlider />
+      <StatusBar />
       <SimulationSetupModal />
     </div>
   );
@@ -94,6 +110,14 @@ function MainContent({ nav }: { nav: NavKey }) {
     );
   }
 
+  if (nav === "desk") {
+    return (
+      <div className="min-h-0 flex-1">
+        <ChatPanel />
+      </div>
+    );
+  }
+
   if (nav === "alerts") {
     return (
       <div className="min-h-0 flex-1 flex flex-col">
@@ -110,7 +134,7 @@ function MainContent({ nav }: { nav: NavKey }) {
         <WorldMap />
       </div>
       {!mapFocus && (
-        <div className="grid h-[240px] shrink-0 grid-cols-3 gap-3">
+        <div className="grid h-[240px] shrink-0 grid-cols-3 grid-rows-[minmax(0,1fr)] gap-3">
           <MarketOverview />
           <TopMovers />
           <NewsFeed />

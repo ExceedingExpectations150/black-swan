@@ -21,6 +21,77 @@ import type {
 
 const PRICE_SERIES_CAP = 512;
 const SOCIAL_CAP = 100;
+const SIM_INDEX_SPARK_CAP = 64;
+const SIM_INDEX_SECTORS = 4; // composite + the N largest sectors by anchor cap
+
+// Move-alert thresholds (|% vs anchor|). Each is a "band"; an alert fires when
+// a ticker crosses into a MORE extreme band than it last alerted at, so a
+// stock sliding -5% -> -10% -> -15% raises three escalating signals, not spam.
+const ALERT_BANDS = [5, 10, 15, 20];
+const MAX_ALERTS_PER_TICK = 6; // on a market-wide shock, keep only the sharpest
+
+function moveBand(changePct: number): number {
+  const mag = Math.abs(changePct);
+  let lvl = 0;
+  for (let i = 0; i < ALERT_BANDS.length; i++) if (mag >= ALERT_BANDS[i]) lvl = i + 1;
+  return changePct >= 0 ? lvl : -lvl;
+}
+
+// Cap-weighted sim indices: composite (base 10,000) + top sectors (base
+// 1,000), each valued as base x (sim cap / real-market anchor cap). Real
+// data only — every input is a clearing price from the matching engine.
+function computeSimIndices(
+  companies: Record<string, Company>,
+  prev: MarketIndex[],
+): MarketIndex[] {
+  const groups = new Map<string, { cur: number; anchor: number }>();
+  const bump = (key: string, cur: number, anchor: number) => {
+    const g = groups.get(key);
+    if (g) {
+      g.cur += cur;
+      g.anchor += anchor;
+    } else {
+      groups.set(key, { cur, anchor });
+    }
+  };
+  for (const c of Object.values(companies)) {
+    const cur = c.current_price * c.shares_outstanding;
+    const anchor = c.anchor_price * c.shares_outstanding;
+    if (anchor <= 0) continue;
+    bump("__composite__", cur, anchor);
+    bump(c.sector, cur, anchor);
+  }
+  const composite = groups.get("__composite__");
+  if (!composite) return [];
+  groups.delete("__composite__");
+  const topSectors = [...groups.entries()]
+    .sort((a, b) => b[1].anchor - a[1].anchor)
+    .slice(0, SIM_INDEX_SECTORS);
+  const prevSpark = new Map(prev.map((i) => [i.symbol, i.sparkline]));
+  const build = (symbol: string, name: string, base: number, g: { cur: number; anchor: number }): MarketIndex => {
+    const ratio = g.cur / g.anchor;
+    const value = base * ratio;
+    const spark = prevSpark.get(symbol) ?? [];
+    const sparkline =
+      spark.length >= SIM_INDEX_SPARK_CAP
+        ? [...spark.slice(1 - SIM_INDEX_SPARK_CAP), value]
+        : [...spark, value];
+    return {
+      symbol,
+      name,
+      value,
+      change: value - base,
+      change_pct: (ratio - 1) * 100,
+      sparkline,
+    };
+  };
+  return [
+    build("BSW", "BSW Composite", 10_000, composite),
+    ...topSectors.map(([sector, g]) =>
+      build(`BSW:${sector.slice(0, 4).toUpperCase()}`, sector, 1_000, g),
+    ),
+  ];
+}
 
 interface StoreState {
   companies: Record<string, Company>;
@@ -29,6 +100,10 @@ interface StoreState {
   social: SocialPostT[];
   economy: Economy | null;
   indices: MarketIndex[];
+  /** Live indices computed from SIM clearing prices (cap-weighted vs the
+   *  real-market anchor baseline). Empty until the first tick lands; the
+   *  UI shows the static real-market strip only while these are empty. */
+  simIndices: MarketIndex[];
   latestTickId: number;
   scrubbedTickId: number | null;
   news: string;
@@ -44,6 +119,12 @@ interface StoreState {
   maxTicks: number | null;
   durationDays: number | null;
   ticksPerDay: number | null;
+  /** Most-extreme signed move band already alerted per ticker (dedup). */
+  alertBands: Record<string, number>;
+  /** Headline armed at the boot terminal — prefills the setup console. */
+  armedEvent: string;
+  /** Current simulated time (epoch seconds) — advances with the sim clock. */
+  simTime: number | null;
 
   // actions
   hydrate: (snapshot: StateSnapshot) => void;
@@ -54,6 +135,7 @@ interface StoreState {
   applyPriceUpdate: (
     prices: { ticker: string; price: number; change_pct: number; volume: number }[],
     tickId: number,
+    tsEpoch?: number,
   ) => void;
   applyCompanyUpdate: (
     updates: {
@@ -74,6 +156,11 @@ interface StoreState {
   fetchHistory: (tickId: number) => Promise<void>;
   clearHistory: () => void;
   setSimStatus: (paused: boolean, tickInterval: number, isPausing?: boolean, maxTicks?: number | null, durationDays?: number | null, ticksPerDay?: number | null) => void;
+  setArmedEvent: (headline: string) => void;
+  setSimTime: (epochSeconds: number) => void;
+  /** Clear all per-run state after the backend wiped the world (soft reset —
+   *  no page reload, so a client sitting on the boot terminal is unaffected). */
+  resetWorld: () => void;
 }
 
 export const useStore = create<StoreState>((set) => ({
@@ -83,6 +170,7 @@ export const useStore = create<StoreState>((set) => ({
   social: [],
   economy: null,
   indices: [],
+  simIndices: [],
   latestTickId: 0,
   scrubbedTickId: null,
   news: "Awaiting market open...",
@@ -98,16 +186,44 @@ export const useStore = create<StoreState>((set) => ({
   maxTicks: null,
   durationDays: null,
   ticksPerDay: null,
+  alertBands: {},
+  armedEvent: "",
+  simTime: null,
 
   hydrate: (snapshot) =>
     set((s) => {
       const companies: Record<string, Company> = {};
       for (const c of snapshot.companies) companies[c.ticker] = c;
       const social = snapshot.social.slice(0, SOCIAL_CAP);
-      // If the backend has wiped the DB, snapshot.tick_id will be 0.
-      // We must forcefully reset the frontend's latestTickId so the setup modal appears.
+      // If the backend's world rewound (fresh DB after a wipe, or a process
+      // restart), stale per-run series from the previous world must go —
+      // otherwise charts silently merge points from two different runs.
       const isFreshDB = snapshot.tick_id === 0;
-      
+      const worldRewound = isFreshDB || snapshot.tick_id < s.latestTickId;
+      if (worldRewound) {
+        return {
+          companies,
+          social,
+          economy: snapshot.economy ?? null,
+          news: "",
+          tickId: snapshot.tick_id,
+          latestTickId: snapshot.tick_id,
+          priceSeries: {},
+          volumeSeries: {},
+          simIndices: isFreshDB ? [] : computeSimIndices(companies, []),
+          alerts: [],
+          alertBands: {},
+          scrubbedTickId: null,
+          simTime: null,
+          isPaused: snapshot.paused ?? false,
+          tickInterval: snapshot.tick_interval_seconds ?? s.tickInterval,
+          maxTicks: snapshot.max_ticks ?? null,
+          durationDays: snapshot.duration_days ?? null,
+          ticksPerDay: snapshot.ticks_per_day ?? null,
+          hydrated: true,
+        };
+      }
+
       return {
         companies,
         social,
@@ -115,8 +231,9 @@ export const useStore = create<StoreState>((set) => ({
         news: "",
         tickId: snapshot.tick_id,
         latestTickId: isFreshDB ? 0 : Math.max(s.latestTickId, snapshot.tick_id),
-        isPaused: snapshot.paused,
-        tickInterval: snapshot.tick_interval_seconds,
+        simIndices: isFreshDB ? [] : computeSimIndices(companies, s.simIndices),
+        isPaused: snapshot.paused ?? s.isPaused,
+        tickInterval: snapshot.tick_interval_seconds ?? s.tickInterval,
         maxTicks: snapshot.max_ticks ?? s.maxTicks,
         durationDays: snapshot.duration_days ?? s.durationDays,
         ticksPerDay: snapshot.ticks_per_day ?? s.ticksPerDay,
@@ -135,12 +252,18 @@ export const useStore = create<StoreState>((set) => ({
         : [...s.watchlist, ticker],
     })),
 
-  applyPriceUpdate: (prices, tickId) =>
+  applyPriceUpdate: (prices, tickId, tsEpoch) =>
     set((s) => {
       if (s.scrubbedTickId !== null) return s;
+      // Series points are keyed by simulated time; fall back to the tick
+      // ordinal only if the envelope carried no usable timestamp.
+      const t = tsEpoch ?? tickId;
       const companies = { ...s.companies };
       const priceSeries = { ...s.priceSeries };
       const volumeSeries = { ...s.volumeSeries };
+      const bands = { ...s.alertBands };
+      const nowIso = new Date().toISOString();
+      const candidates: { ticker: string; changePct: number; price: number }[] = [];
       for (const p of prices) {
         const existing = companies[p.ticker];
         if (existing) {
@@ -151,15 +274,58 @@ export const useStore = create<StoreState>((set) => ({
             market_cap: p.price * existing.shares_outstanding,
           };
         }
-        const series = priceSeries[p.ticker] ? [...priceSeries[p.ticker]] : [];
-        series.push({ t: tickId, price: p.price, volume: p.volume });
-        priceSeries[p.ticker] = series.slice(-PRICE_SERIES_CAP);
+        // Signal-alert bookkeeping: fire only on crossing to a more extreme band.
+        const band = moveBand(p.change_pct);
+        const prevBand = bands[p.ticker] ?? 0;
+        const escalated = band > 0 ? band > prevBand : band < prevBand;
+        if (band !== 0 && escalated) {
+          candidates.push({ ticker: p.ticker, changePct: p.change_pct, price: p.price });
+        }
+        bands[p.ticker] = band;
+        // Single-copy append (a spread + slice per ticker per tick doubles
+        // the allocation churn at 51 symbols/tick).
+        const series = priceSeries[p.ticker] ?? [];
+        const trimmedSeries =
+          series.length >= PRICE_SERIES_CAP ? series.slice(1 - PRICE_SERIES_CAP) : [...series];
+        trimmedSeries.push({ t, tick: tickId, price: p.price, volume: p.volume });
+        priceSeries[p.ticker] = trimmedSeries;
 
-        const vol = volumeSeries[p.ticker] ? [...volumeSeries[p.ticker]] : [];
-        vol.push({ t: tickId, v: p.volume });
-        volumeSeries[p.ticker] = vol.slice(-PRICE_SERIES_CAP);
+        const vol = volumeSeries[p.ticker] ?? [];
+        const trimmedVol =
+          vol.length >= PRICE_SERIES_CAP ? vol.slice(1 - PRICE_SERIES_CAP) : [...vol];
+        trimmedVol.push({ t, v: p.volume });
+        volumeSeries[p.ticker] = trimmedVol;
       }
-      return { companies, priceSeries, volumeSeries, tickId };
+
+      // Turn the sharpest fresh crossings into alerts (cap so a market-wide
+      // shock doesn't dump 51 at once).
+      const fresh: Alert[] = candidates
+        .sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct))
+        .slice(0, MAX_ALERTS_PER_TICK)
+        .map(({ ticker, changePct, price }) => {
+          const name = companies[ticker]?.name ?? ticker;
+          const dir = changePct >= 0 ? "up" : "down";
+          const mag = Math.abs(changePct);
+          return {
+            id: `${ticker}-${tickId}-${Math.round(changePct)}`,
+            tick_id: tickId,
+            ts: nowIso,
+            severity: mag >= 15 ? "critical" : "warning",
+            title: `${ticker} ${dir} ${mag.toFixed(1)}%`,
+            message: `${name} is ${dir} ${mag.toFixed(1)}% vs its anchor, trading at $${price.toLocaleString(undefined, { maximumFractionDigits: 2 })}.`,
+            read: false,
+          } as Alert;
+        });
+
+      return {
+        companies,
+        priceSeries,
+        volumeSeries,
+        tickId,
+        alertBands: bands,
+        alerts: fresh.length > 0 ? [...fresh, ...s.alerts].slice(0, 100) : s.alerts,
+        simIndices: computeSimIndices(companies, s.simIndices),
+      };
     }),
 
   applyCompanyUpdate: (updates) =>
@@ -205,7 +371,7 @@ export const useStore = create<StoreState>((set) => ({
 
   setEconomy: (economy) => set((s) => {
     if (s.scrubbedTickId !== null) return s;
-    let newAlerts: Alert[] = [];
+    const newAlerts: Alert[] = [];
     if (s.economy && s.economy.system_stress_index < 0.8 && economy.system_stress_index >= 0.8) {
       newAlerts.push({
          id: Math.random().toString(36).substring(7),
@@ -268,7 +434,12 @@ export const useStore = create<StoreState>((set) => ({
     try {
       const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
       const res = await fetch(`${API_BASE}/api/history/${tickId}`);
-      if (!res.ok) return;
+      if (!res.ok) {
+        // No snapshot for that tick — release the scrub freeze instead of
+        // leaving the dashboard stuck on stale data with no history shown.
+        set({ scrubbedTickId: null });
+        return;
+      }
       const snapshot = await res.json();
       set((s) => {
         const companies = { ...s.companies };
@@ -297,6 +468,31 @@ export const useStore = create<StoreState>((set) => ({
 
   setSimStatus: (paused, interval, isPausing = false, maxTicks = null, durationDays = null, ticksPerDay = null) =>
     set({ isPaused: paused, tickInterval: interval, isPausing, maxTicks, durationDays, ticksPerDay }),
+
+  setArmedEvent: (headline) => set({ armedEvent: headline }),
+
+  setSimTime: (epochSeconds) => set({ simTime: epochSeconds }),
+
+  resetWorld: () =>
+    set({
+      priceSeries: {},
+      volumeSeries: {},
+      social: [],
+      economy: null,
+      alerts: [],
+      alertBands: {},
+      news: "Awaiting market open...",
+      tickId: 0,
+      latestTickId: 0,
+      simIndices: [],
+      scrubbedTickId: null,
+      simTime: null,
+      isPaused: false,
+      isPausing: false,
+      maxTicks: null,
+      durationDays: null,
+      ticksPerDay: null,
+    }),
 }));
 
 // Company list as a MEMOIZED hook. A raw selector returning Object.values()

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Play, Loader2, Calendar, Settings, Zap } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { API_BASE } from "@/lib/socket";
@@ -8,16 +8,22 @@ import { API_BASE } from "@/lib/socket";
 export default function SimulationSetupModal() {
   const latestTickId = useStore((s) => s.latestTickId);
   const connection = useStore((s) => s.connectionStatus);
-  const isPaused = useStore((s) => s.isPaused);
-  
-  // Show this modal if we are connected but the simulation is exactly at Tick 0.
-  // Once it starts (tick > 0), the modal disappears forever.
+  const armedEvent = useStore((s) => s.armedEvent);
+
+  // The setup console: shown when connected and the world is at tick 0
+  // (every page load resets to state zero, so each session configures its
+  // own run here). Disappears once the run starts producing ticks.
   const shouldShow = connection === "open" && latestTickId === 0;
 
   const [isLoading, setIsLoading] = useState(false);
   const [scenario, setScenario] = useState("");
+  // Prefill with the headline armed at the boot terminal.
+  useEffect(() => {
+    if (armedEvent) setScenario(armedEvent);
+  }, [armedEvent]);
   const [durationDays, setDurationDays] = useState(30);
-  const [ticksPerDay, setTicksPerDay] = useState(1);
+  // 4 ticks/day (6-hour) by default so daily candles carry real OHLC range.
+  const [ticksPerDay, setTicksPerDay] = useState(4);
   const [speed, setSpeed] = useState(0.0); // MAX default
 
   if (!shouldShow) return null;
@@ -48,8 +54,8 @@ export default function SimulationSetupModal() {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
-      <div className="w-[400px] bg-[#0a0a0a] border border-hair rounded-lg shadow-2xl flex flex-col overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85">
+      <div className="w-[400px] bg-[#0a0a0a] border border-hair rounded-sm flex flex-col overflow-hidden">
         
         {/* Header */}
         <div className="p-4 border-b border-hair bg-white/[0.02]">
@@ -75,7 +81,7 @@ export default function SimulationSetupModal() {
               value={scenario}
               onChange={(e) => setScenario(e.target.value)}
               placeholder="e.g. AMD announces breakthrough AI chip..."
-              className="w-full bg-black border border-hair rounded px-3 py-2 text-sm text-white placeholder-ink3 focus:outline-none focus:border-accent"
+              className="w-full bg-black border border-hair rounded-sm px-3 py-2 text-sm text-white placeholder-ink3 focus:outline-none focus:border-accent"
               spellCheck={false}
             />
           </div>
@@ -85,7 +91,7 @@ export default function SimulationSetupModal() {
             <label className="text-xs text-ink2 flex items-center gap-1.5">
               <Calendar size={14} /> Total Simulated Duration (Days)
             </label>
-            <div className="flex bg-white/5 rounded border border-hair overflow-hidden">
+            <div className="flex bg-white/5 rounded-sm border border-hair overflow-hidden">
               {[
                 { label: "1 Week", val: 7 },
                 { label: "1 Month", val: 30 },
@@ -110,7 +116,7 @@ export default function SimulationSetupModal() {
             <label className="text-xs text-ink2 flex items-center gap-1.5">
               <Settings size={14} /> Resolution (Ticks per Day)
             </label>
-            <div className="flex bg-white/5 rounded border border-hair overflow-hidden">
+            <div className="flex bg-white/5 rounded-sm border border-hair overflow-hidden">
               {[
                 { label: "1 (Daily)", val: 1 },
                 { label: "4 (6-Hour)", val: 4 },
@@ -137,7 +143,7 @@ export default function SimulationSetupModal() {
             <label className="text-xs text-ink2 flex items-center gap-1.5">
               <Zap size={14} /> Execution Speed
             </label>
-            <div className="flex bg-white/5 rounded border border-hair overflow-hidden">
+            <div className="flex bg-white/5 rounded-sm border border-hair overflow-hidden">
               {[
                 { label: "1x", val: 3.0 },
                 { label: "5x", val: 0.6 },
@@ -163,7 +169,7 @@ export default function SimulationSetupModal() {
           <button
             onClick={handleStart}
             disabled={isLoading}
-            className="w-full flex items-center justify-center gap-2 bg-accent text-black font-bold py-2.5 rounded hover:bg-white transition-colors disabled:opacity-50"
+            className="w-full flex items-center justify-center gap-2 bg-accent text-black font-bold py-2.5 rounded-sm hover:bg-white transition-colors disabled:opacity-50"
           >
             {isLoading ? (
               <>

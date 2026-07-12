@@ -1,44 +1,28 @@
 "use client";
 
-import { useState } from "react";
 import { useStore } from "@/lib/store";
 import { fmtPrice, fmtPct, changeClass } from "@/lib/format";
 import Sparkline from "@/components/Sparkline";
 
-type Tab = "INDICES" | "COMMODITIES" | "CURRENCIES" | "CRYPTO";
-const TABS: Tab[] = ["INDICES", "COMMODITIES", "CURRENCIES", "CRYPTO"];
-
-// The backend only feeds indices; the other three tabs are honest voids.
+// The backend feeds sector indices only — no fake asset-class tabs.
 export default function MarketOverview() {
-  const [tab, setTab] = useState<Tab>("INDICES");
-  const indices = useStore((s) => s.indices);
+  const realIndices = useStore((s) => s.indices);
+  const simIndices = useStore((s) => s.simIndices);
+  const indices = simIndices.length > 0 ? simIndices : realIndices;
 
   return (
     <div className="panel flex h-full flex-col">
-      <div className="flex items-center gap-4 border-b border-hair px-3 py-2.5">
-        <span className="section-title shrink-0">Markets</span>
-        <div className="flex items-center gap-1 overflow-x-auto scroll-thin">
-          {TABS.map((t) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`rounded px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] transition ${
-                tab === t
-                  ? "bg-white/[0.06] text-ink"
-                  : "text-ink3 hover:text-ink2"
-              }`}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
+      <div className="flex items-center justify-between border-b border-hair px-3 py-2">
+        <span className="section-title shrink-0">Markets — Indices</span>
+        <span className="tnum font-mono text-[9px] uppercase tracking-[0.14em] text-ink3">
+          {indices.length} tracked
+        </span>
       </div>
 
       <div className="scroll-thin flex-1 overflow-y-auto">
-        {tab === "INDICES" ? (
-          indices.length === 0 ? (
-            <EmptyBody label="AWAITING INDEX DATA" />
-          ) : (
+        {indices.length === 0 ? (
+          <EmptyBody label="AWAITING INDEX DATA" />
+        ) : (
             <table className="w-full border-collapse">
               <thead>
                 <tr className="text-[9.5px] uppercase tracking-[0.14em] text-ink3">
@@ -53,7 +37,7 @@ export default function MarketOverview() {
                 {indices.map((idx) => (
                   <tr
                     key={idx.symbol}
-                    className="border-t border-hair/60 text-xs"
+                    className="border-t border-hair/60 text-xs transition-colors hover:bg-white/[0.025]"
                   >
                     <td className="px-3 py-2.5">
                       <div className="font-medium text-ink">{idx.name}</div>
@@ -86,19 +70,15 @@ export default function MarketOverview() {
                 ))}
               </tbody>
             </table>
-          )
-        ) : (
-          <EmptyBody label="NOT AVAILABLE" dash />
         )}
       </div>
     </div>
   );
 }
 
-function EmptyBody({ label, dash = false }: { label: string; dash?: boolean }) {
+function EmptyBody({ label }: { label: string }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-2 py-10 text-center">
-      {dash && <div className="text-2xl text-ink3">—</div>}
       <div className="text-[10px] uppercase tracking-[0.16em] text-ink3">
         {label}
       </div>

@@ -180,3 +180,178 @@ class MacroAnalyst:
         )
         raw: str = await self.router.prompt_cohort(session, prompt)
         return _extract_last_paragraph(raw)
+
+
+# --------------------------------------------------------------------------
+# DailyReporter — end-of-day wire report from a quantitative digest
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DailyDigest:
+    """Quantitative end-of-day rollup; the caller (tick engine) builds it."""
+
+    day_index: int
+    tick_id: int
+    index_change_pct: float
+    top_gainer_ticker: str
+    top_gainer_pct: float
+    top_loser_ticker: str
+    top_loser_pct: float
+    total_volume: int
+    stress_index: float
+    bankrupt_count: int
+    headline: str
+
+
+def render_factual(digest: DailyDigest) -> str:
+    """Automated wire report — the LLM-down path, written like journalism.
+
+    Every figure comes from the digest's real numbers (never invented);
+    lede structure and vocabulary vary deterministically by day so
+    consecutive reports read as reporting, not a filled-in form. This is
+    the same approach real wire services use for automated market briefs.
+    """
+    chg = digest.index_change_pct
+    mag = abs(chg)
+    day = digest.day_index
+    variant = day % 3
+
+    if mag < 0.15:
+        severity = "drifted"
+    elif mag < 1.0:
+        severity = "slipped" if chg < 0 else "edged higher"
+    elif mag < 3.0:
+        severity = "fell sharply" if chg < 0 else "rallied"
+    else:
+        severity = "was routed" if chg < 0 else "surged"
+
+    if variant == 0:
+        lede = (
+            f"Markets {severity} on Day {day}, with the composite index "
+            f"closing {chg:+.2f}%."
+        )
+    elif variant == 1:
+        lede = (
+            f"The composite index {severity} {mag:.2f}% by the Day {day} "
+            f"close{' as sellers kept control of the tape' if chg < -1.0 else ''}."
+        )
+    else:
+        lede = (
+            f"Day {day} closed with the index at {chg:+.2f}% — a session that "
+            f"{'extended the slide' if chg < 0 else 'clawed back ground'}."
+        )
+
+    spread = digest.top_gainer_pct - digest.top_loser_pct
+    if variant == 0:
+        movers = (
+            f"{digest.top_gainer_ticker} held up best at {digest.top_gainer_pct:+.2f}% "
+            f"while {digest.top_loser_ticker} bore the brunt at "
+            f"{digest.top_loser_pct:+.2f}%, a {spread:.2f}-point dispersion across the tape."
+        )
+    else:
+        movers = (
+            f"At the extremes, {digest.top_loser_ticker} lost "
+            f"{abs(digest.top_loser_pct):.2f}% against {digest.top_gainer_ticker}'s "
+            f"{digest.top_gainer_pct:+.2f}% — dispersion of {spread:.2f} points."
+        )
+
+    if digest.stress_index >= 0.6:
+        stress_read = "systemic stress gauges running hot"
+    elif digest.stress_index >= 0.3:
+        stress_read = "stress gauges elevated but contained"
+    else:
+        stress_read = "stress gauges subdued"
+    tape = (
+        f"Turnover reached {digest.total_volume:,} shares with {stress_read} "
+        f"({digest.stress_index:.2f})"
+        + (
+            f" and {digest.bankrupt_count} names now in bankruptcy."
+            if digest.bankrupt_count
+            else "."
+        )
+    )
+
+    sentences = [lede, movers, tape]
+    if digest.headline:
+        sentences.append(
+            f'Desks continue to trade around the standing shock: "{digest.headline}".'
+        )
+    return " ".join(sentences)
+
+
+def render_factual_company_post(
+    ticker: str,
+    name: str,
+    sector: str,
+    change_pct: float,
+    price: float,
+    tick_id: int,
+    headline: str,
+) -> str:
+    """One wire-style company snippet from real numbers (news-desk fallback).
+
+    Varies phrasing deterministically by (ticker, tick) so the feed reads
+    like coverage rather than one repeated sentence. Data-only; no invention.
+    """
+    seed = (sum(ord(c) for c in ticker) + tick_id) % 4
+    direction = "down" if change_pct < 0 else "up"
+    mag = abs(change_pct)
+    if seed == 0:
+        body = (
+            f"{name} ({ticker}) trades {direction} {mag:.2f}% at ${price:,.2f} "
+            f"as {sector} names react to the tape."
+        )
+    elif seed == 1:
+        body = (
+            f"{ticker} marks ${price:,.2f}, {change_pct:+.2f}% on the session — "
+            f"one of the more active {sector} prints."
+        )
+    elif seed == 2:
+        body = (
+            f"Order flow keeps {name} {direction} {mag:.2f}% at ${price:,.2f}; "
+            f"{sector} desks watching the level."
+        )
+    else:
+        body = (
+            f"{ticker} changes hands at ${price:,.2f} ({change_pct:+.2f}%), "
+            f"tracking the broader {sector} move."
+        )
+    if headline and mag >= 2.0:
+        body += f' Traders tie the move to the standing shock: "{headline[:60]}".'
+    return body
+
+
+class DailyReporter:
+    """Financial wire-service reporter writing the end-of-day market report.
+
+    Raises RuntimeError only when the router does; the caller falls back to
+    render_factual(digest) — this class never synthesizes a report itself.
+    """
+
+    def __init__(self, router: GeminiModelRouter) -> None:
+        self.router = router
+
+    def _build_prompt(self, digest: DailyDigest) -> str:
+        return (
+            "You are a financial wire-service reporter (Reuters/Bloomberg style) "
+            "writing the end-of-day market report for a simulated exchange.\n\n"
+            "Today's verified closing numbers — the ONLY figures that exist:\n"
+            f"- Trading day: {digest.day_index} (tick {digest.tick_id})\n"
+            f"- Market index change: {digest.index_change_pct:+.2f}%\n"
+            f"- Top gainer: {digest.top_gainer_ticker} ({digest.top_gainer_pct:+.2f}%)\n"
+            f"- Top loser: {digest.top_loser_ticker} ({digest.top_loser_pct:+.2f}%)\n"
+            f"- Total volume: {digest.total_volume:,} shares\n"
+            f"- System stress index: {digest.stress_index:.2f}\n"
+            f"- Bankruptcies on record: {digest.bankrupt_count}\n"
+            f"- Driving headline: {digest.headline}\n\n"
+            "Write a 3-5 sentence end-of-day market report grounded ONLY in the "
+            "numbers above. Do NOT invent any figure, ticker, or statistic that "
+            "is not listed. Output plain text as a single paragraph: no markdown, "
+            "no headings, no bullet points, no preamble."
+        )
+
+    async def report(self, http: aiohttp.ClientSession, digest: DailyDigest) -> str:
+        """One router call; returns the report paragraph (may be empty)."""
+        raw: str = await self.router.prompt_cohort(http, self._build_prompt(digest))
+        return _extract_last_paragraph(raw)

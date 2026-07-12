@@ -4,24 +4,26 @@ import {
   LayoutDashboard,
   LineChart,
   MessagesSquare,
+  MessageSquareText,
   Radar,
   BarChart3,
   Bell,
   Star,
   Circle,
 } from "lucide-react";
-import { useStore, useCompanyList } from "@/lib/store";
+import { useStore } from "@/lib/store";
 import { fmtPrice, fmtPct, changeClass } from "@/lib/format";
 import Sparkline from "@/components/Sparkline";
 
-export type NavKey = "dashboard" | "market" | "social" | "nodes" | "analytics" | "alerts";
+export type NavKey = "dashboard" | "market" | "social" | "nodes" | "analytics" | "desk" | "alerts";
 
-const NAV: { key: NavKey; label: string; icon: typeof LayoutDashboard }[] = [
+export const NAV: { key: NavKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { key: "market", label: "Stock Market", icon: LineChart },
   { key: "social", label: "News Feed", icon: MessagesSquare },
   { key: "nodes", label: "Company Nodes", icon: Radar },
   { key: "analytics", label: "Analytics", icon: BarChart3 },
+  { key: "desk", label: "Trading Desk", icon: MessageSquareText },
   { key: "alerts", label: "Alerts", icon: Bell },
 ];
 
@@ -32,34 +34,44 @@ export default function Sidebar({
   active: NavKey;
   onNavigate: (key: NavKey) => void;
 }) {
-  const companies = useCompanyList();
+  const companies = useStore((s) => s.companies);
   const watchlist = useStore((s) => s.watchlist);
-  const indices = useStore((s) => s.indices);
+  const realIndices = useStore((s) => s.indices);
+  const simIndices = useStore((s) => s.simIndices);
+  const indices = simIndices.length > 0 ? simIndices : realIndices;
   const connection = useStore((s) => s.connectionStatus);
   const setSelectedTicker = useStore((s) => s.setSelectedTicker);
 
-  const byTicker = Object.fromEntries(companies.map((c) => [c.ticker, c]));
-  const watched = watchlist.map((t) => byTicker[t]).filter(Boolean);
+  // companies is already a Record — index it directly instead of
+  // rebuilding an Object.fromEntries map of all 51 entries every render.
+  const watched = watchlist.map((t) => companies[t]).filter(Boolean);
   const globalSpark = indices[0]?.sparkline ?? [];
   const isOpen = connection === "open";
 
   return (
     <aside className="flex w-[230px] shrink-0 flex-col gap-4 border-r border-hair p-3">
       <nav className="flex flex-col gap-0.5">
-        {NAV.map(({ key, label, icon: Icon }) => {
+        {NAV.map(({ key, label, icon: Icon }, i) => {
           const on = active === key;
           return (
             <button
               key={key}
               onClick={() => onNavigate(key)}
-              className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-[13px] transition ${
+              className={`flex items-center gap-2.5 rounded-sm px-2.5 py-1.5 text-[12.5px] transition ${
                 on
                   ? "bg-white/[0.07] text-ink"
                   : "text-ink2 hover:bg-white/[0.03] hover:text-ink"
               }`}
             >
               <Icon size={15} />
-              {label}
+              <span className="flex-1 text-left">{label}</span>
+              <kbd
+                className={`tnum font-mono text-[9px] ${
+                  on ? "text-ink3" : "text-ink3/60"
+                }`}
+              >
+                {i + 1}
+              </kbd>
             </button>
           );
         })}
@@ -72,7 +84,7 @@ export default function Sidebar({
         </div>
         <div className="mt-1 text-[11px] text-ink2">Global Markets — Live</div>
         <div className="mt-2 h-8">
-          <Sparkline data={globalSpark} up height={32} />
+          <Sparkline data={globalSpark} up={(indices[0]?.change_pct ?? 0) >= 0} height={32} />
         </div>
       </div>
 
@@ -89,7 +101,7 @@ export default function Sidebar({
               <button
                 key={c.ticker}
                 onClick={() => setSelectedTicker(c.ticker)}
-                className="flex items-center justify-between rounded px-1.5 py-1.5 text-left hover:bg-white/[0.04]"
+                className="flex items-center justify-between rounded-sm px-1.5 py-1.5 text-left hover:bg-white/[0.04]"
               >
                 <div className="min-w-0 leading-none">
                   <div className="tnum text-xs text-ink">{c.ticker}</div>

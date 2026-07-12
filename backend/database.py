@@ -20,7 +20,7 @@ load_dotenv()
 
 DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./blackswan.db")
 
-RETAIL_COHORT_COUNT: int = 50
+RETAIL_COHORT_COUNT: int = max(1, int(os.getenv("BLACKSWAN_RETAIL_COHORTS", "150")))
 INSTITUTIONAL_COUNT: int = 5
 
 RETAIL_CASH_BASELINE: float = 100_000.0
@@ -109,7 +109,7 @@ def seed_initial_market_state() -> int:
     """Populate companies, the agent roster, and holdings if never seeded.
 
     If `agent_states` is empty: seeds the curated companies (real anchor
-    prices, hard-fault on fetch failure), creates exactly 50
+    prices, hard-fault on fetch failure), creates the configured number of
     "gemma_retail_cohort" agents with randomized risk tolerances (0.1 - 0.9)
     and 5 "timesfm_institutional" agents with large cash reserves, and gives
     every agent a deterministic per-ticker starting position.
@@ -124,6 +124,12 @@ def seed_initial_market_state() -> int:
             return 0
 
         seed_companies(db)
+        # SessionLocal runs with autoflush=False: without an explicit flush
+        # the just-added companies are invisible to the SELECT below, the
+        # ticker list comes back empty, and every agent gets seeded with
+        # ZERO holdings — leaving the market unable to sell (no crossing
+        # trades, no volume, ever).
+        db.flush()
         tickers: list[str] = list(db.execute(select(Company.ticker)).scalars())
 
         agents: list[AgentState] = [

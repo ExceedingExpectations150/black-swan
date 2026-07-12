@@ -12,7 +12,7 @@ export default function TimelineSlider() {
   const ticksPerDay = useStore((s) => s.ticksPerDay);
   const fetchHistory = useStore((s) => s.fetchHistory);
   const clearHistory = useStore((s) => s.clearHistory);
-  const connection = useStore((s) => s.connection);
+  const connection = useStore((s) => s.connectionStatus);
 
   const [sliderValue, setSliderValue] = useState<number>(latestTickId);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
@@ -32,9 +32,11 @@ export default function TimelineSlider() {
       clearTimeout(debounceRef.current);
     }
     
-    // Set a new debounced fetch
+    // Set a new debounced fetch. Releasing at or within one tick of the
+    // live edge snaps back to live — dragging "roughly to the end" must
+    // never leave the dashboard silently frozen on history.
     debounceRef.current = setTimeout(() => {
-      if (val >= latestTickId) {
+      if (val >= latestTickId - 1) {
         clearHistory();
       } else {
         fetchHistory(val);
@@ -49,14 +51,16 @@ export default function TimelineSlider() {
   if (latestTickId <= 1 && sliderValue <= 1) return null;
 
   const sliderMax = maxTicks ? Math.max(maxTicks, latestTickId) : latestTickId;
-  
-  let formattedLabel = `Tick: ${sliderValue} / ${sliderMax}`;
+
+  let unit = "Tick";
+  let current = sliderValue;
+  let total = sliderMax;
   if (durationDays && ticksPerDay) {
-    const currentDay = Math.ceil(sliderValue / ticksPerDay);
-    const maxDay = Math.max(durationDays, Math.ceil(sliderMax / ticksPerDay));
-    formattedLabel = `Day: ${currentDay} / ${maxDay}`;
+    unit = "Day";
+    current = Math.ceil(sliderValue / ticksPerDay);
+    total = Math.max(durationDays, Math.ceil(sliderMax / ticksPerDay));
   } else if (maxTicks === 30 || maxTicks === 7) {
-    formattedLabel = `Day: ${sliderValue} / ${sliderMax}`;
+    unit = "Day";
   }
 
   return (
@@ -64,9 +68,9 @@ export default function TimelineSlider() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           {scrubbedTickId !== null ? (
-            <button 
+            <button
               onClick={returnToLive}
-              className="flex items-center gap-1.5 px-3 py-1 rounded bg-accent/20 text-accent hover:bg-accent/30 transition-colors text-xs font-medium uppercase tracking-wider"
+              className="flex items-center gap-1.5 px-3 py-1 rounded-sm bg-accent/20 text-accent hover:bg-accent/30 transition-colors text-xs font-medium uppercase tracking-wider"
             >
               <Play size={14} />
               Return to Live
@@ -78,8 +82,8 @@ export default function TimelineSlider() {
             </div>
           )}
         </div>
-        <div className="text-xs text-ink2 font-mono">
-          {formattedLabel.split(':')[0]}: <span className="text-ink1 font-bold">{formattedLabel.split(':')[1].split('/')[0].trim()}</span> / {formattedLabel.split('/')[1].trim()}
+        <div className="tnum text-xs text-ink2 font-mono">
+          {unit}: <span className="text-ink font-bold">{current}</span> / {total}
         </div>
       </div>
       
@@ -94,16 +98,16 @@ export default function TimelineSlider() {
             onChange={handleSliderChange}
             className="absolute z-10 w-full h-full opacity-0 cursor-pointer"
           />
-          {/* Custom track styling */}
-          <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
-             <div 
+          {/* Custom track styling — square terminal rail, no rounded pill */}
+          <div className="w-full h-[3px] bg-white/10 overflow-hidden">
+             <div
                className="h-full bg-accent transition-all duration-75 ease-linear"
                style={{ width: `${(sliderValue / sliderMax) * 100}%` }}
              />
           </div>
-          {/* Custom thumb styling */}
-          <div 
-            className="absolute w-3 h-3 bg-white rounded-full shadow-[0_0_10px_rgba(255,255,255,0.5)] pointer-events-none transition-all duration-75 ease-linear -ml-1.5"
+          {/* Playhead — a thin vertical marker, not a glowing orb */}
+          <div
+            className="absolute h-3.5 w-[2px] bg-ink pointer-events-none transition-all duration-75 ease-linear -ml-px"
             style={{ left: `${(sliderValue / sliderMax) * 100}%` }}
           />
         </div>

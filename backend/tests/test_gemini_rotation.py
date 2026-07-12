@@ -36,7 +36,9 @@ async def fake_generate_content(request: web.Request) -> web.Response:
             "key": request.headers.get("x-goog-api-key", ""),
         }
     )
-    if len(SEEN) <= 2:
+    # MAX_RETRIES is deliberately 1 (quota discipline: a 429 storm must not
+    # retry-multiply), so the ladder is: one 429 -> rotate key+model -> 200.
+    if len(SEEN) <= 1:
         return web.Response(status=429, text='{"error": {"code": 429}}')
     body: dict[str, Any] = {
         "candidates": [{"content": {"parts": [{"text": "HOLD: uncertainty too high"}]}}]
@@ -65,12 +67,13 @@ async def main() -> None:
         text = await router.prompt_cohort(session, "Market crashed 30%. BUY, SELL or HOLD?")
 
     assert text == "HOLD: uncertainty too high", f"unexpected text: {text!r}"
-    assert len(SEEN) == 3, f"expected 3 requests, saw {len(SEEN)}"
+    assert len(SEEN) == 2, f"expected 2 requests, saw {len(SEEN)}"
     assert SEEN[0] == {"model": PRIMARY_MODEL, "key": "test-key-primary"}
     assert SEEN[1] == {"model": FALLBACK_MODEL, "key": "test-key-backup"}
-    assert SEEN[2] == {"model": FALLBACK_MODEL, "key": "test-key-primary"}
 
-    # Non-429 errors must raise hard, immediately.
+    # 5xx rotates once to the fallback model (the gemma-4 500 incident:
+    # a broken primary model must not kill prose when the fallback works),
+    # then raises if the fallback also fails.
     SEEN.clear()
 
     async def fail_500(request: web.Request) -> web.Response:
@@ -94,13 +97,13 @@ async def main() -> None:
             await router2.prompt_cohort(session, "ping")
     except RuntimeError as exc:
         assert "HTTP 500" in str(exc), str(exc)
-        assert len(SEEN) == 1, "500 must not be retried"
+        assert len(SEEN) == 2, "500 must rotate to the fallback once, then raise"
     else:
-        raise AssertionError("HTTP 500 did not raise")
+        raise AssertionError("persistent HTTP 500 did not raise")
 
     await runner.cleanup()
     await runner2.cleanup()
-    print("PASS: 429 rotation (key+model+backoff), success parse, hard-fail on 500")
+    print("PASS: 429 rotation (key+model+backoff), success parse, 5xx rotate-then-raise")
 
 
 if __name__ == "__main__":

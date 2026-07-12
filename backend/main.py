@@ -141,14 +141,21 @@ class RateLimiter:
 _llm_rate_limiter = RateLimiter(max_calls=20, window_seconds=60.0)
 
 
+# Only trust X-Forwarded-For when the app is actually behind a proxy that
+# sets it (opt-in). Trusting it unconditionally lets any client spoof a fresh
+# IP per request and bypass the limiter; ignoring it entirely collapses to one
+# global bucket behind a proxy. TRUST_PROXY=1 in the proxied deployment.
+_TRUST_PROXY = os.getenv("TRUST_PROXY", "").strip() in ("1", "true", "yes")
+
+
 def _client_ip(request: Request) -> str:
-    """Best-effort client IP. Behind a reverse proxy (Render/Cloudflare per
-    DEPLOY.md) request.client.host is the proxy's IP, which would collapse the
-    per-IP limiter into one shared global bucket; prefer the first
-    X-Forwarded-For hop so the limit stays per-user in production."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    """Per-client key for rate limiting. Uses the direct peer by default
+    (un-spoofable on a localhost/demo deploy); reads the first X-Forwarded-For
+    hop only when TRUST_PROXY is set (behind Render/Cloudflare per DEPLOY.md)."""
+    if _TRUST_PROXY:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
 
 
@@ -521,10 +528,13 @@ async def set_gemini_key(payload: GeminiKeyPayload, request: Request) -> dict[st
         keys.append(payload.backup.strip())
     os.environ["GEMINI_API_KEY_PRIMARY"] = keys[0]
     os.environ["GEMINI_API_KEY_BACKUP"] = keys[1] if len(keys) > 1 else keys[0]
-    updated = 0
     live = getattr(controller.tick_engine, "router", None) if controller.tick_engine else None
-    for router in (live, controller.chat_router):
-        if router is not None and hasattr(router, "set_keys"):
+    # chat_router is often the SAME object as tick_engine.router — dedup by
+    # identity so the count reflects distinct routers actually updated.
+    routers = {id(r): r for r in (live, controller.chat_router) if r is not None}
+    updated = 0
+    for router in routers.values():
+        if hasattr(router, "set_keys"):
             router.set_keys(keys)
             updated += 1
     logger.info("Gemini key set at runtime — %d live router(s) updated; LLM prose enabled", updated)
@@ -597,9 +607,13 @@ async def start_simulation(payload: StartPayload | None = None) -> dict[str, Any
 
 @app.post("/api/stop")
 async def stop_simulation() -> dict[str, Any]:
-    if not controller.is_running or controller.task is None:
-        return {"status": "not_running", "payload": controller.get_status_payload()}
+    was_running = controller.is_running and controller.task is not None
+    # Always tear down BOTH loops (idempotent). If the tick loop crashed and
+    # returned, is_running is False but the independent forecast_refresh_loop
+    # can still be alive — gating on is_running would orphan it forever.
     await controller.stop_ai_tasks()
+    if not was_running:
+        return {"status": "not_running", "payload": controller.get_status_payload()}
     status = controller.get_status_payload()
     asyncio.create_task(controller.manager.broadcast({"type": "sim_status", "tick_id": controller.next_tick_id, "ts": "", "payload": status}))
     return {"status": "stopped", "payload": status}

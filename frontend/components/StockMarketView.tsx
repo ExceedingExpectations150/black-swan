@@ -47,7 +47,7 @@ const DAY_SECONDS = 86400;
 // one candle per simulated DAY, with open/high/low/close taken from that
 // day's intraday ticks (real wicks whenever the sim runs >1 tick/day).
 // Falls back to count-based bucketing when there's at most one tick per day.
-function bucketize(points: PricePoint[]): Bucketed {
+function bucketize(points: PricePoint[], ticksPerDay: number | null): Bucketed {
   const clean = points.filter((p) => p.price > 0).sort((a, b) => a.t - b.t);
   if (clean.length === 0) return { candles: [], volumes: [] };
 
@@ -59,7 +59,10 @@ function bucketize(points: PricePoint[]): Bucketed {
     if (arr) arr.push(p);
     else byDay.set(day, [p]);
   }
-  const intraday = clean.length / byDay.size >= 2;
+  // Decide the mode from the RUN's configured resolution, not a live
+  // point/day ratio — the ratio flips from <2 to >=2 between the first two
+  // ticks of day 1, which would merge candles and jump the x-axis mid-run.
+  const intraday = (ticksPerDay ?? 1) > 1;
 
   const buckets: PricePoint[][] = [];
   const times: number[] = [];
@@ -116,6 +119,7 @@ export default function StockMarketView() {
   const points = useStore((s) => (activeTicker ? s.priceSeries[activeTicker] : undefined));
   const company = useStore((s) => (activeTicker ? s.companies[activeTicker] : undefined));
   const durationDays = useStore((s) => s.durationDays);
+  const ticksPerDay = useStore((s) => s.ticksPerDay);
   // Ticker membership rarely changes; key the 51-button strip on the joined
   // symbol list so it stops re-rendering on every price tick.
   const tickerKey = companies.map((c) => c.ticker).join(",");
@@ -225,7 +229,7 @@ export default function StockMarketView() {
     };
   }, [activeTicker]);
 
-  const bucketed = useMemo(() => bucketize(points ?? []), [points]);
+  const bucketed = useMemo(() => bucketize(points ?? [], ticksPerDay), [points, ticksPerDay]);
   const prevRef = useRef<{ ticker: string | null; times: (number | string)[] }>({
     ticker: null,
     times: [],

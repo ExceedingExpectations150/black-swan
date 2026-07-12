@@ -119,19 +119,28 @@ class GeminiModelRouter:
                 "x-goog-api-key": self._keys[self._key_index],
                 "Content-Type": "application/json",
             }
-            async with session.post(self._endpoint(), json=payload, headers=headers) as resp:
-                if resp.status == 200:
-                    data: dict[str, Any] = await resp.json()
-                    try:
-                        text: str = data["candidates"][0]["content"]["parts"][0]["text"]
-                    except (KeyError, IndexError, TypeError) as exc:
-                        raise RuntimeError(
-                            f"Unexpected Gemini response shape from {self._model}: {data!r}"
-                        ) from exc
-                    return text
+            # Normalize EVERY network failure (DNS, connection refused, TLS,
+            # server disconnect) to RuntimeError. Call sites catch RuntimeError
+            # and degrade to factual fallbacks; a raw aiohttp.ClientError would
+            # otherwise escape those handlers and crash the whole tick loop.
+            try:
+                async with session.post(
+                    self._endpoint(), json=payload, headers=headers
+                ) as resp:
+                    if resp.status == 200:
+                        data: dict[str, Any] = await resp.json()
+                        try:
+                            text: str = data["candidates"][0]["content"]["parts"][0]["text"]
+                        except (KeyError, IndexError, TypeError) as exc:
+                            raise RuntimeError(
+                                f"Unexpected Gemini response shape from {self._model}: {data!r}"
+                            ) from exc
+                        return text
 
-                last_status = resp.status
-                body: str = await resp.text()
+                    last_status = resp.status
+                    body: str = await resp.text()
+            except aiohttp.ClientError as exc:
+                raise RuntimeError(f"Gemini network error on {self._model}: {exc}") from exc
 
             if last_status >= 429 and attempt < MAX_RETRIES:
                 self._rotate_on_rate_limit()

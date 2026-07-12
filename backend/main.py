@@ -462,6 +462,74 @@ class ChatMessagePayload(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessagePayload] = Field(max_length=50)
 
+class GeminiKeyPayload(BaseModel):
+    primary: str = Field(min_length=10, max_length=200)
+    backup: str | None = Field(default=None, max_length=200)
+
+
+# --------------------------------------------------------------------- #
+# Config: compute device + runtime API-key entry                        #
+# --------------------------------------------------------------------- #
+
+_compute_cache: dict[str, str] | None = None
+
+
+def _compute_info() -> dict[str, str]:
+    """Resolved inference device + torch backend, cached (torch import is heavy).
+
+    `torch.cuda` is the accelerator API for both NVIDIA CUDA and AMD ROCm, so
+    an AMD GPU under the ROCm wheel reports device='cuda', backend='ROCm/HIP'.
+    """
+    global _compute_cache
+    if _compute_cache is None:
+        try:
+            import torch
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            backend = (
+                "ROCm/HIP"
+                if getattr(torch.version, "hip", None)
+                else ("CUDA" if getattr(torch.version, "cuda", None) else "CPU")
+            )
+        except Exception:
+            device, backend = "unknown", "unknown"
+        _compute_cache = {"device": device, "compute_backend": backend}
+    return _compute_cache
+
+
+def _llm_active() -> bool:
+    router = getattr(controller.tick_engine, "router", None) if controller.tick_engine else None
+    if router is not None:
+        return bool(getattr(router, "is_active", False))
+    return bool(os.getenv("GEMINI_API_KEY_PRIMARY"))
+
+
+@app.get("/api/config")
+async def get_config() -> dict[str, Any]:
+    """Compute device + whether LLM prose is active (drives the setup console)."""
+    return {"llm_active": _llm_active(), **_compute_info()}
+
+
+@app.post("/api/config/gemini")
+async def set_gemini_key(payload: GeminiKeyPayload, request: Request) -> dict[str, Any]:
+    """Add a Gemini key at RUNTIME — enables LLM news/PR/desk prose with no
+    restart. The key is injected into any live routers and set in the process
+    env for future ones; it is never logged, echoed, or persisted to disk."""
+    _rate_limit_llm(request)
+    keys = [payload.primary.strip()]
+    if payload.backup and payload.backup.strip():
+        keys.append(payload.backup.strip())
+    os.environ["GEMINI_API_KEY_PRIMARY"] = keys[0]
+    os.environ["GEMINI_API_KEY_BACKUP"] = keys[1] if len(keys) > 1 else keys[0]
+    updated = 0
+    live = getattr(controller.tick_engine, "router", None) if controller.tick_engine else None
+    for router in (live, controller.chat_router):
+        if router is not None and hasattr(router, "set_keys"):
+            router.set_keys(keys)
+            updated += 1
+    logger.info("Gemini key set at runtime — %d live router(s) updated; LLM prose enabled", updated)
+    return {"status": "ok", "llm_active": True, "live_routers_updated": updated}
+
 
 # --------------------------------------------------------------------- #
 # Simulation controls                                                    #

@@ -80,6 +80,28 @@ desk answers from live statistics (verified end-to-end in keyless mode).
 
 ## Run it
 
+### Docker (one command)
+
+```bash
+docker compose up --build
+# frontend -> http://localhost:5055   backend -> http://localhost:8010
+```
+
+Brings up both containers (FastAPI + TimesFM backend, Next.js terminal
+frontend), fully **keyless**. To enable LLM prose, export `GEMINI_API_KEY_PRIMARY`
+/ `GEMINI_API_KEY_BACKUP` before `up` (or uncomment the `env_file` line in
+`docker-compose.yml`). The first `/api/start` downloads the TimesFM checkpoint
+(~1 GB) into the persisted `hf-cache` volume, so it's slow once and fast after.
+
+**AMD GPU (ROCm):** the backend ships a second Dockerfile — `backend/Dockerfile.rocm`
+— identical except it installs the ROCm PyTorch wheel, so TimesFM runs on an
+AMD Instinct/Radeon GPU with no code change. Set `dockerfile: Dockerfile.rocm`
+and uncomment the `devices:` / `group_add:` block in `docker-compose.yml` on a
+ROCm host; the startup log prints `TimesFM device=cuda backend=ROCm/HIP` when it
+lands on the GPU.
+
+### Local (no Docker)
+
 Backend (Python 3.12, FastAPI):
 
 ```bash

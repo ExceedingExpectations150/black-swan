@@ -24,9 +24,9 @@ from typing import Any, AsyncIterator
 
 import aiohttp
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from database import SessionLocal, init_db, seed_initial_market_state, Base, engine
@@ -110,15 +110,66 @@ def _latest_economy(db: Any) -> dict[str, Any]:
     return compute_economy_snapshot(db, latest_tick)
 
 
+# CORSMiddleware does NOT cover the WebSocket handshake, so /ws enforces the
+# same origin allowlist itself. Cap concurrent sockets so a connection flood
+# can't blow up the per-tick broadcast fan-out.
+MAX_WS_CLIENTS = 64
+
+
+class RateLimiter:
+    """Per-IP sliding-window limiter (dependency-free).
+
+    Guards the endpoints that hit the paid Gemini API (/api/event, /api/chat)
+    so a trivial curl loop from one host can't exhaust quota or run up cost.
+    """
+
+    def __init__(self, max_calls: int, window_seconds: float) -> None:
+        self.max_calls = max_calls
+        self.window = window_seconds
+        self._hits: dict[str, list[float]] = {}
+
+    def check(self, key: str) -> None:
+        now = time.monotonic()
+        cutoff = now - self.window
+        hits = [t for t in self._hits.get(key, []) if t > cutoff]
+        if len(hits) >= self.max_calls:
+            raise HTTPException(status_code=429, detail="rate limit exceeded; slow down")
+        hits.append(now)
+        self._hits[key] = hits
+
+
+_llm_rate_limiter = RateLimiter(max_calls=20, window_seconds=60.0)
+
+
+def _rate_limit_llm(request: Request) -> None:
+    client = request.client.host if request.client else "unknown"
+    _llm_rate_limiter.check(client)
+
+
 class ConnectionManager:
     """Tracks live WebSocket clients and fans envelope events out to all."""
 
     def __init__(self) -> None:
         self._clients: list[WebSocket] = []
 
-    async def connect(self, websocket: WebSocket) -> None:
+    async def connect(self, websocket: WebSocket) -> bool:
+        """Accept only same-origin sockets, up to the connection cap.
+
+        Returns False (and closes with a policy code) when the origin is not
+        allowed or the cap is reached; the caller then bails out.
+        """
+        origin = websocket.headers.get("origin")
+        # A same-origin browser always sends Origin; allow no-Origin clients
+        # (native ws tools, curl) only against a localhost-only allowlist.
+        if origin is not None and origin not in ALLOWED_ORIGINS:
+            await websocket.close(code=1008)
+            return False
+        if len(self._clients) >= MAX_WS_CLIENTS:
+            await websocket.close(code=1013)  # try again later
+            return False
         await websocket.accept()
         self._clients.append(websocket)
+        return True
 
     def disconnect(self, websocket: WebSocket) -> None:
         if websocket in self._clients:
@@ -360,26 +411,36 @@ app.add_middleware(
 )
 
 
+# Bounded request models: caps prevent an unauthenticated caller from
+# spinning unbounded compute (a 999999999-day run) or pushing oversized text
+# into the paid LLM prompts. duration_days x ticks_per_day now bounds total
+# ticks to a finite run even at MAX speed (speed=0). Pydantic rejects
+# out-of-range input with a 422 before any work starts.
+MAX_DURATION_DAYS = 365
+MAX_TICKS_PER_DAY = 96
+MAX_INTERVAL_SECONDS = 60.0
+
+
 class EventPayload(BaseModel):
-    headline: str
+    headline: str = Field(max_length=500)
 
 class StartPayload(BaseModel):
-    speed: float
-    duration_days: int
-    ticks_per_day: int
+    speed: float = Field(ge=0.0, le=MAX_INTERVAL_SECONDS)
+    duration_days: int = Field(ge=1, le=MAX_DURATION_DAYS)
+    ticks_per_day: int = Field(ge=1, le=MAX_TICKS_PER_DAY)
 
 class SpeedPayload(BaseModel):
-    interval: float
+    interval: float = Field(ge=0.0, le=MAX_INTERVAL_SECONDS)
 
 class DurationPayload(BaseModel):
-    days: int
+    days: int = Field(ge=1, le=MAX_DURATION_DAYS)
 
 class ChatMessagePayload(BaseModel):
-    role: str
-    content: str
+    role: str = Field(max_length=16)
+    content: str = Field(max_length=2000)
 
 class ChatRequest(BaseModel):
-    messages: list[ChatMessagePayload]
+    messages: list[ChatMessagePayload] = Field(max_length=50)
 
 
 # --------------------------------------------------------------------- #
@@ -425,8 +486,13 @@ async def start_simulation(payload: StartPayload | None = None) -> dict[str, Any
     try:
         controller.build_engines()
     except Exception as exc:
+        # Log the real cause server-side; return a generic message so the
+        # client never sees internal paths / package internals from a failed
+        # torch/timesfm/HF-checkpoint init.
         logger.exception("AI layer startup failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500, detail="failed to initialize AI engines"
+        ) from exc
     controller.paused = False
     # Refresh loop first so the forecast cache warms as early as possible.
     controller.forecast_task = asyncio.create_task(controller.forecast_refresh_loop())
@@ -475,8 +541,9 @@ async def reset_simulation() -> dict[str, Any]:
 
 
 @app.post("/api/event")
-async def inject_event(payload: EventPayload) -> dict[str, Any]:
+async def inject_event(payload: EventPayload, request: Request) -> dict[str, Any]:
     """Set the active Black Swan headline fed into every cohort prompt."""
+    _rate_limit_llm(request)
     controller.active_event = payload.headline.strip()
     # Kick the analyst immediately so the per-sector impact lands now
     # instead of waiting for the next refresh cycle.
@@ -698,7 +765,7 @@ async def get_economy() -> dict[str, Any]:
 
 
 @app.post("/api/chat")
-async def chat_with_desk(payload: ChatRequest) -> dict[str, Any]:
+async def chat_with_desk(payload: ChatRequest, request: Request) -> dict[str, Any]:
     """Senior-trader desk chat, grounded in the live market's real numbers.
 
     Works with or without a running simulation and with or without LLM
@@ -706,6 +773,7 @@ async def chat_with_desk(payload: ChatRequest) -> dict[str, Any]:
     always computed from real data, and if the desk model is unreachable the
     reply IS that brief — never fabricated prose.
     """
+    _rate_limit_llm(request)
     if not payload.messages or payload.messages[-1].role != "user":
         raise HTTPException(status_code=400, detail="messages must end with a user turn")
 
@@ -769,7 +837,8 @@ async def get_indices_endpoint() -> dict[str, Any]:
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
-    await controller.manager.connect(websocket)
+    if not await controller.manager.connect(websocket):
+        return  # origin rejected or connection cap reached
     try:
         while True:
             # Dashboard clients don't send commands; this keeps the socket

@@ -73,7 +73,8 @@ def test_orders_flow_and_market_clears():
     companies = _companies()
     orders = build_behavioral_orders(
         1, cohorts, companies, _holdings(cohorts, companies),
-        _histories(companies), event_intensity=0.0, decided_agent_ids=set(),
+        _histories(companies), event_intensity=0.0, event_direction=0.0,
+        decided_agent_ids=set(),
     )
     assert len(orders) > 50, f"expected an active market, got {len(orders)} orders"
     buys = sum(1 for o in orders if o.order_type == OrderType.BUY)
@@ -89,24 +90,29 @@ def test_orders_flow_and_market_clears():
         assert len(transactions) > 0
 
 
-def test_black_swan_moves_prices_through_beliefs():
+def test_event_moves_prices_through_beliefs_both_directions():
     cohorts = _cohorts(150)
     engine = MatchingEngine()
 
-    def clearing(intensity: float, tick: int) -> float:
+    def clearing(intensity: float, direction: float, tick: int) -> float:
         companies = _companies()
         orders = build_behavioral_orders(
             tick, cohorts, companies, _holdings(cohorts, companies),
-            _histories(companies), event_intensity=intensity, decided_agent_ids=set(),
+            _histories(companies), event_intensity=intensity,
+            event_direction=direction, decided_agent_ids=set(),
         )
         book = [o for o in orders if o.ticker == "AAPL"]
         price, _, volume = engine.resolve_order_book(book, 230.0)
         assert volume > 0
         return price
 
-    calm = sum(clearing(0.0, t) for t in range(1, 6)) / 5
-    panic = sum(clearing(1.0, t) for t in range(1, 6)) / 5
-    assert panic < calm, f"fear must push prices down via order flow: calm={calm} panic={panic}"
+    calm = sum(clearing(0.0, 0.0, t) for t in range(1, 6)) / 5
+    panic = sum(clearing(1.0, -1.0, t) for t in range(1, 6)) / 5
+    euphoria = sum(clearing(1.0, 1.0, t) for t in range(1, 6)) / 5
+    # A bearish shock pushes prices DOWN and a bullish catalyst pushes them UP,
+    # both purely through order flow — good news can rally the market.
+    assert panic < calm, f"bearish event must push down: calm={calm} panic={panic}"
+    assert euphoria > calm, f"bullish event must push up: calm={calm} euphoria={euphoria}"
 
 
 def test_llm_decided_cohorts_are_skipped():
@@ -115,7 +121,8 @@ def test_llm_decided_cohorts_are_skipped():
     decided = {a.agent_id for a in cohorts[:10]}
     orders = build_behavioral_orders(
         1, cohorts, companies, _holdings(cohorts, companies),
-        _histories(companies), event_intensity=0.0, decided_agent_ids=decided,
+        _histories(companies), event_intensity=0.0, event_direction=0.0,
+        decided_agent_ids=decided,
     )
     assert all(o.agent_id not in decided for o in orders)
 
@@ -123,6 +130,6 @@ def test_llm_decided_cohorts_are_skipped():
 if __name__ == "__main__":
     test_strategies_are_stable_and_mixed()
     test_orders_flow_and_market_clears()
-    test_black_swan_moves_prices_through_beliefs()
+    test_event_moves_prices_through_beliefs_both_directions()
     test_llm_decided_cohorts_are_skipped()
     print("ALL BEHAVIORAL TESTS PASSED")

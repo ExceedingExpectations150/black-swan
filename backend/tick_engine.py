@@ -106,14 +106,19 @@ IMBALANCE_PRESSURE: float = 0.25
 # fundamentals (event analyst -> conditioned forecasts), never through a
 # multiplier on the clearing price.
 #
-# Black Swan transmission. An active event is NOT applied to the price; it is
-# applied to agent DECISIONS. EVENT_FEAR_INTENSITY feeds the behavioral
-# crowd's fear term (-> sell tilt); EVENT_SENTIMENT_HIT drives a per-tick
-# negative sentiment impulse (bad news) that the crowd and the economy panel
-# both read. The crash then emerges from the resulting order flow.
+# Event transmission. An active event is NOT applied to the price; it is
+# applied to agent DECISIONS. EVENT_FEAR_INTENSITY sets the magnitude of the
+# decaying impulse; its DIRECTION (bull vs bear) comes from the analyst's
+# per-sector verdict, so a positive catalyst lifts sentiment and the crowd
+# buys, while a shock does the reverse. EVENT_SENTIMENT_HIT scales the per-tick
+# sentiment impulse the crowd and the economy panel both read. The move then
+# emerges from the resulting order flow.
 EVENT_FEAR_INTENSITY: float = 1.0
 EVENT_SENTIMENT_HIT: float = 0.03
 EVENT_SENTIMENT_DECAY: float = 0.9
+# Analyst impact (fraction) at which the signed event direction saturates to
+# +/-1. A mean sector impact of +/-8% => a full-strength bull/bear impulse.
+EVENT_DIRECTION_SCALE: float = 0.08
 # A Black Swan's panic is an IMPULSE that fades, not a permanent force.
 # Without decay the crowd sells every tick forever and the market spirals to
 # ~zero. Fear decays from the full hit toward a small residual over
@@ -310,7 +315,8 @@ class TickEngine:
             # behavioral fear term, so the crash is an impulse that finds a
             # floor instead of a permanent slide.
             event_intensity = self._event_intensity(active_event, tick_id)
-            self._apply_event_sentiment(companies, event_intensity)
+            event_direction = self._event_direction()
+            self._apply_event_sentiment(companies, event_intensity, self.event_impact)
 
             async with aiohttp.ClientSession() as http:
                 # 3 & 4. News desk and LLM swarm run on paced cadences (see
@@ -357,6 +363,7 @@ class TickEngine:
                     holdings,
                     histories,
                     event_intensity=event_intensity,
+                    event_direction=event_direction,
                     decided_agent_ids=decided,
                 )
                 orders = (
@@ -869,20 +876,41 @@ class TickEngine:
         )
         return EVENT_FEAR_INTENSITY * decay
 
-    @staticmethod
-    def _apply_event_sentiment(companies: list[Company], intensity: float) -> None:
-        """Transmit an active Black Swan as a negative sentiment impulse.
+    def _event_direction(self) -> float:
+        """Signed event direction in [-1, 1] from the analyst's verdict.
 
-        This does NOT move price — it moves crowd sentiment (bad news), which
-        the behavioral engine then trades on. The hit is heterogeneous per
-        company (seeded from the ticker) and scaled by the decaying panic
-        `intensity`, so as the shock fades sentiment mean-reverts toward zero.
+        The mean per-ticker impact decides whether the event is bullish
+        (positive catalyst -> optimism, buy tilt) or bearish (shock -> fear,
+        sell tilt). 0.0 when no impact map exists yet, so nothing is assumed
+        before the analyst has spoken.
+        """
+        if not self.event_impact:
+            return 0.0
+        vals = list(self.event_impact.values())
+        mean = sum(vals) / len(vals)
+        return max(-1.0, min(1.0, mean / EVENT_DIRECTION_SCALE))
+
+    @staticmethod
+    def _apply_event_sentiment(
+        companies: list[Company], intensity: float, event_impact: dict[str, float]
+    ) -> None:
+        """Transmit an active event as a SIGNED sentiment impulse.
+
+        This does NOT move price — it moves crowd sentiment, which the
+        behavioral engine then trades on. Each company's impulse is signed by
+        the analyst's per-ticker verdict (a name the event helps gains
+        optimism; one it hurts loses it), heterogeneous per company (seeded
+        from the ticker) and scaled by the decaying `intensity`, so as the
+        event fades sentiment mean-reverts toward zero. A name with no analyst
+        verdict gets no impulse — good news is no longer forced negative.
         """
         if intensity <= 0.0:
             return
         for company in companies:
             bias = (sum(ord(ch) for ch in company.ticker) % 100) / 100.0  # 0..1
-            impulse = -EVENT_SENTIMENT_HIT * (0.5 + bias) * intensity
+            imp = event_impact.get(company.ticker, 0.0)
+            direction = max(-1.0, min(1.0, imp / EVENT_DIRECTION_SCALE))
+            impulse = EVENT_SENTIMENT_HIT * direction * (0.5 + bias) * intensity
             company.sentiment = max(
                 -1.0, min(1.0, company.sentiment * EVENT_SENTIMENT_DECAY + impulse)
             )

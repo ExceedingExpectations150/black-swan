@@ -14,3 +14,4 @@ __pycache__/
 .mcp.json
 CLAUDE.md.pre-ruflo
 .agents/skills/terminal-ui/
+skills-lock.json
